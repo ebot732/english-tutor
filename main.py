@@ -1,11 +1,12 @@
 import os
 import re
+import json
 import sqlite3
 import tempfile
 import asyncio
-import httpx
+import urllib.request
+import urllib.parse
 import flet as ft
-from gtts import gTTS
 
 STORAGE_DIR = os.getenv("FLET_APP_STORAGE_DATA", ".")
 DB_PATH = os.path.join(STORAGE_DIR, "tutor_data.db")
@@ -53,7 +54,7 @@ def get_setting(key: str) -> str:
     cursor.execute("SELECT value FROM settings WHERE key = ?", (key,))
     row = cursor.fetchone()
     conn.close()
-    return row if row else ""
+    return row[0] if row else ""
 
 
 def set_setting(key: str, value: str):
@@ -76,34 +77,70 @@ def get_ai_config() -> tuple[str, str, str]:
         return "https://openrouter.ai", api_key, "meta-llama/llama-3.2-3b-instruct:free"
 
 
-async def ask_llm(messages: list[dict], temperature: float = 0.7) -> str:
+def _sync_ask_llm(messages: list[dict], temperature: float) -> str:
     base_url, api_key, model = get_ai_config()
+    url = f"{base_url}/chat/completions"
     headers = {
         "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
+        "User-Agent": "EnglishTutorApp/1.0"
     }
-    payload = {
+    payload = json.dumps({
         "model": model,
         "messages": messages,
         "temperature": temperature
+    }).encode("utf-8")
+
+    req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
+    with urllib.request.urlopen(req, timeout=45) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+        return data["choices"][0]["message"]["content"].strip()
+
+
+async def ask_llm(messages: list[dict], temperature: float = 0.7) -> str:
+    return await asyncio.to_thread(_sync_ask_llm, messages, temperature)
+
+
+def _sync_transcribe_audio(file_path: str) -> str:
+    base_url, api_key, _ = get_ai_config()
+    url = f"{base_url}/audio/transcriptions"
+    boundary = "----WebKitFormBoundary7MA4YWxkTrZu0gW"
+
+    with open(file_path, "rb") as f:
+        file_data = f.read()
+
+    body = (
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="model"\r\n\r\nwhisper-1\r\n'
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="language"\r\n\r\nen\r\n'
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="file"; filename="voice.m4a"\r\n'
+        f"Content-Type: audio/m4a\r\n\r\n"
+    ).encode("utf-8") + file_data + f"\r\n--{boundary}--\r\n".encode("utf-8")
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": f"multipart/form-data; boundary={boundary}",
+        "User-Agent": "EnglishTutorApp/1.0"
     }
-    async with httpx.AsyncClient(timeout=45.0) as client:
-        resp = await client.post(f"{base_url}/chat/completions", headers=headers, json=payload)
-        resp.raise_for_status()
-        data = resp.json()
-        return data["choices"]["message"]["content"].strip()
+    req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+    with urllib.request.urlopen(req, timeout=45) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+        return data.get("text", "").strip()
 
 
 async def transcribe_audio(file_path: str) -> str:
-    base_url, api_key, _ = get_ai_config()
-    headers = {"Authorization": f"Bearer {api_key}"}
-    async with httpx.AsyncClient(timeout=45.0) as client:
-        with open(file_path, "rb") as f:
-            files = {"file": ("voice.m4a", f, "audio/m4a")}
-            data = {"model": "whisper-1", "language": "en"}
-            resp = await client.post(f"{base_url}/audio/transcriptions", headers=headers, data=data, files=files)
-            resp.raise_for_status()
-            return resp.json().get("text", "").strip()
+    return await asyncio.to_thread(_sync_transcribe_audio, file_path)
+
+
+def _sync_download_tts(clean_text: str, out_path: str):
+    q = urllib.parse.quote(clean_text)
+    url = f"https://google.com{q}&tl=en&client=tw-ob"
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        with open(out_path, "wb") as f:
+            f.write(resp.read())
 
 
 def build_system_prompt() -> str:
@@ -160,16 +197,14 @@ async def main(page: ft.Page):
         try:
             tts_file = os.path.join(tempfile.gettempdir(), f"tts_{abs(hash(clean_text))}.mp3")
             if not os.path.exists(tts_file):
-                def _gen():
-                    tts = gTTS(text=clean_text, lang="en")
-                    tts.save(tts_file)
-                await asyncio.to_thread(_gen)
+                await asyncio.to_thread(_sync_download_tts, clean_text, tts_file)
 
             audio_player.src = tts_file
             audio_player.update()
             audio_player.play()
         except Exception as e:
             show_snack(f"Ошибка озвучки: {e}", ft.colors.RED_600)
+
 
     chat_list = ft.ListView(expand=True, spacing=12, padding=15, auto_scroll=True)
     user_input = ft.TextField(
