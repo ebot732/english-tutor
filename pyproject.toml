@@ -1,0 +1,17 @@
+[project]
+name = "EnglishTutor"
+version = "1.0.0"
+description = "AI English Tutor with Voice & Dictionary"
+requires-python = ">=3.10"
+
+[tool.flet]
+org = "com.aitutor"
+product = "English Tutor"
+
+[tool.flet.android]
+permission = [
+    "android.permission.INTERNET",
+    "android.permission.RECORD_AUDIO",
+    "android.permission.WRITE_EXTERNAL_STORAGE",
+    "android.permission.READ_EXTERNAL_STORAGE"
+]
