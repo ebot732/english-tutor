@@ -58,7 +58,7 @@ def get_setting(key: str) -> str:
     cursor.execute("SELECT value FROM settings WHERE key = ?", (key,))
     row = cursor.fetchone()
     conn.close()
-    return str(row[0]) if row and row[0] is not None else ""
+    return str(row) if row and row is not None else ""
 
 
 def set_setting(key: str, value: str):
@@ -74,11 +74,11 @@ def get_ai_config() -> tuple[str, str, str]:
     api_key = get_setting("api_key").strip()
 
     if provider == "ProxyAPI":
-        return "https://proxyapi.ru", api_key, "gpt-4o-mini"
+        return "https://api.proxyapi.ru/openai/v1", api_key, "gpt-4o-mini"
     elif provider == "VseGPT":
-        return "https://vsegpt.ru", api_key, "openai/gpt-4o-mini"
+        return "https://api.vsegpt.ru/v1", api_key, "openai/gpt-4o-mini"
     else:
-        return "https://openrouter.ai", api_key, "meta-llama/llama-3.2-3b-instruct:free"
+        return "https://openrouter.ai/api/v1", api_key, "openrouter/free"
 
 
 def _sync_ask_llm(messages: list[dict], temperature: float) -> str:
@@ -100,11 +100,14 @@ def _sync_ask_llm(messages: list[dict], temperature: float) -> str:
     req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
     try:
         with urllib.request.urlopen(req, timeout=45) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            return data["choices"][0]["message"]["content"].strip()
+            raw = resp.read().decode("utf-8")
+            data = json.loads(raw)
+            if "error" in data:
+                raise RuntimeError(str(data["error"]))
+            return data["choices"]["message"]["content"].strip()
     except urllib.error.HTTPError as e:
         err_body = e.read().decode("utf-8", errors="ignore")
-        raise RuntimeError(f"HTTP {e.code}: {err_body[:150]}")
+        raise RuntimeError(f"Ошибка сервера {e.code}: {err_body[:200]}")
 
 
 async def ask_llm(messages: list[dict], temperature: float = 0.7) -> str:
@@ -141,8 +144,7 @@ def extract_english_part(text: str) -> str:
     cleaned = re.sub(r'\(.*?\)', '', text, flags=re.DOTALL)
     cleaned = cleaned.replace("**", "").strip()
     return cleaned
-###########
-
+##########
 async def main(page: ft.Page):
     try:
         init_db()
@@ -153,7 +155,12 @@ async def main(page: ft.Page):
         page.bgcolor = "#F4F6F9"
 
         def show_snack(msg: str, color: str = ft.Colors.BLUE_700):
-            page.open(ft.SnackBar(ft.Text(msg, color=ft.Colors.WHITE), bgcolor=color))
+            try:
+                page.open(ft.SnackBar(ft.Text(msg, color=ft.Colors.WHITE), bgcolor=color))
+            except Exception:
+                page.snack_bar = ft.SnackBar(ft.Text(msg, color=ft.Colors.WHITE), bgcolor=color)
+                page.snack_bar.open = True
+                page.update()
 
         async def speak_text(english_text: str):
             clean_text = extract_english_part(english_text)
@@ -176,12 +183,12 @@ async def main(page: ft.Page):
 
         chat_list = ft.ListView(expand=True, spacing=12, padding=15, auto_scroll=True)
         user_input = ft.TextField(
-            hint_text="Напишите или надиктуйте ответ...",
+            hint_text="Напишите или надиктуйте на EN...",
             expand=True,
             border_radius=20,
             bgcolor=ft.Colors.WHITE,
             content_padding=ft.padding.symmetric(horizontal=16, vertical=10),
-            on_submit=lambda e: asyncio.create_task(send_message(user_input.value))
+            on_submit=lambda e: page.run_task(send_message)
         )
         loading_indicator = ft.ProgressBar(visible=False, color=ft.Colors.BLUE_600)
 
@@ -211,7 +218,8 @@ async def main(page: ft.Page):
 
         def build_message_bubble(role: str, content: str):
             is_user = (role == "user")
-            new_words = re.findall(r'\*\*(.*?)\*\*', content) if not is_user else []
+            is_error = (role == "error")
+            new_words = re.findall(r'\*\*(.*?)\*\*', content) if (not is_user and not is_error) else []
 
             word_chips = []
             for w in set(new_words):
@@ -224,20 +232,20 @@ async def main(page: ft.Page):
                             bgcolor=ft.Colors.AMBER_100,
                             color=ft.Colors.BLACK87,
                         ),
-                        on_click=lambda e, word=w: asyncio.create_task(save_word_to_dict(word))
+                        on_click=lambda e, word=w: page.run_task(save_word_to_dict, word)
                     )
                 )
 
             bubble_controls = [
                 ft.Text(
                     content.replace("**", ""),
-                    color=ft.Colors.WHITE if is_user else ft.Colors.BLACK87,
+                    color=ft.Colors.WHITE if (is_user or is_error) else ft.Colors.BLACK87,
                     size=15,
                     selectable=True
                 )
             ]
 
-            if not is_user:
+            if not is_user and not is_error:
                 bubble_controls.append(
                     ft.Row(
                         [
@@ -245,7 +253,7 @@ async def main(page: ft.Page):
                                 icon=ft.Icons.VOLUME_UP_ROUNDED,
                                 icon_color=ft.Colors.BLUE_700,
                                 tooltip="Прослушать",
-                                on_click=lambda e, txt=content: asyncio.create_task(speak_text(txt))
+                                on_click=lambda e, txt=content: page.run_task(speak_text, txt)
                             ),
                             *word_chips
                         ],
@@ -254,11 +262,13 @@ async def main(page: ft.Page):
                     )
                 )
 
+            bg = ft.Colors.BLUE_600 if is_user else (ft.Colors.RED_600 if is_error else ft.Colors.WHITE)
+
             return ft.Row(
                 [
                     ft.Container(
                         content=ft.Column(bubble_controls, spacing=6),
-                        bgcolor=ft.Colors.BLUE_600 if is_user else ft.Colors.WHITE,
+                        bgcolor=bg,
                         padding=14,
                         border_radius=16,
                         width=page.width * 0.82 if page.width else 300,
@@ -267,9 +277,7 @@ async def main(page: ft.Page):
                 ],
                 alignment=ft.MainAxisAlignment.END if is_user else ft.MainAxisAlignment.START
             )
-
-################
-
+##########
         def load_chat_history():
             chat_list.controls.clear()
             conn = sqlite3.connect(DB_PATH)
@@ -280,31 +288,34 @@ async def main(page: ft.Page):
             for r, c in rows:
                 chat_list.controls.append(build_message_bubble(r, c))
 
-        async def send_message(text: str):
-            text = (text or "").strip()
+        async def send_message():
+            text = (user_input.value or "").strip()
             if not text:
                 return
 
-            if not get_setting("api_key").strip():
-                show_snack("Сначала укажите API-ключ во вкладке «Настройки»!", ft.Colors.RED_600)
+            api_key = get_setting("api_key").strip()
+            if not api_key:
+                chat_list.controls.append(
+                    build_message_bubble("error", "⚠️ Сначала вставьте API-ключ во вкладке «Настройки» и нажмите «Сохранить настройки»!")
+                )
+                page.update()
                 return
 
             user_input.value = ""
             loading_indicator.visible = True
-
-            conn = sqlite3.connect(DB_PATH)
-            cursor = conn.cursor()
-            cursor.execute("INSERT INTO messages (role, content) VALUES (?, ?)", ("user", text))
-            conn.commit()
-
-            cursor.execute("SELECT role, content FROM messages ORDER BY id DESC LIMIT 12")
-            history = [{"role": r, "content": c} for r, c in reversed(cursor.fetchall())]
-            conn.close()
-
             chat_list.controls.append(build_message_bubble("user", text))
             page.update()
 
             try:
+                conn = sqlite3.connect(DB_PATH)
+                cursor = conn.cursor()
+                cursor.execute("INSERT INTO messages (role, content) VALUES (?, ?)", ("user", text))
+                conn.commit()
+
+                cursor.execute("SELECT role, content FROM messages ORDER BY id DESC LIMIT 12")
+                history = [{"role": r, "content": c} for r, c in reversed(cursor.fetchall())]
+                conn.close()
+
                 messages_payload = [{"role": "system", "content": build_system_prompt()}] + history
                 ai_reply = await ask_llm(messages_payload, temperature=0.7)
 
@@ -323,10 +334,10 @@ async def main(page: ft.Page):
 
             except Exception as ex:
                 loading_indicator.visible = False
+                chat_list.controls.append(build_message_bubble("error", f"Ошибка ИИ: {ex}"))
                 page.update()
-                show_snack(f"Ошибка ИИ: {ex}", ft.Colors.RED_600)
 
-        async def clear_chat(e):
+        def clear_chat(e):
             conn = sqlite3.connect(DB_PATH)
             cursor = conn.cursor()
             cursor.execute("DELETE FROM messages")
@@ -338,7 +349,7 @@ async def main(page: ft.Page):
 
         async def mic_button_click(e):
             await user_input.focus()
-            show_snack("Нажмите значок микрофона на открывшейся клавиатуре, чтобы надиктовать по-английски!", ft.Colors.BLUE_700)
+            show_snack("Нажмите значок микрофона на открывшейся клавиатуре телефона (язык EN)!", ft.Colors.BLUE_700)
 
         chat_view = ft.Column(
             [
@@ -365,14 +376,14 @@ async def main(page: ft.Page):
                             ft.IconButton(
                                 icon=ft.Icons.MIC_ROUNDED,
                                 icon_color=ft.Colors.BLUE_600,
-                                tooltip="Голосовой ввод",
-                                on_click=mic_button_click
+                                tooltip="Голосовой ввод с клавиатуры",
+                                on_click=lambda e: page.run_task(mic_button_click, e)
                             ),
                             user_input,
                             ft.IconButton(
                                 icon=ft.Icons.SEND_ROUNDED,
                                 icon_color=ft.Colors.BLUE_600,
-                                on_click=lambda e: asyncio.create_task(send_message(user_input.value))
+                                on_click=lambda e: page.run_task(send_message)
                             )
                         ],
                         spacing=4
@@ -422,7 +433,7 @@ async def main(page: ft.Page):
                                 leading=ft.IconButton(
                                     icon=ft.Icons.VOLUME_UP,
                                     icon_color=ft.Colors.BLUE_600,
-                                    on_click=lambda e, w=word: asyncio.create_task(speak_text(w))
+                                    on_click=lambda e, w=word: page.run_task(speak_text, w)
                                 ),
                                 title=ft.Text(word, weight=ft.FontWeight.BOLD, size=16),
                                 subtitle=ft.Text(trans, size=14),
@@ -450,12 +461,10 @@ async def main(page: ft.Page):
             spacing=0,
             visible=False
         )
-
-##########
-
+########
         provider_dd = ft.Dropdown(
             label="Провайдер ИИ",
-            value=get_setting("provider"),
+            value=get_setting("provider") or "OpenRouter (Бесплатно)",
             options=[
                 ft.dropdown.Option("OpenRouter (Бесплатно)"),
                 ft.dropdown.Option("ProxyAPI"),
@@ -473,7 +482,7 @@ async def main(page: ft.Page):
 
         level_dd = ft.Dropdown(
             label="Ваш уровень английского",
-            value=get_setting("level"),
+            value=get_setting("level") or "A1-A2 (Начальный)",
             options=[
                 ft.dropdown.Option("A1-A2 (Начальный)"),
                 ft.dropdown.Option("B1-B2 (Средний)"),
@@ -483,7 +492,7 @@ async def main(page: ft.Page):
 
         topic_tf = ft.TextField(
             label="Тема диалога",
-            value=get_setting("topic"),
+            value=get_setting("topic") or "Путешествия и кафе",
             hint_text="Например: Заказ еды, Собеседование, Хобби"
         )
 
@@ -492,13 +501,23 @@ async def main(page: ft.Page):
             value=(get_setting("auto_tts") == "1")
         )
 
+        save_status_text = ft.Text("", color=ft.Colors.GREEN_700, weight=ft.FontWeight.BOLD)
+
         def save_settings_click(e):
-            set_setting("provider", provider_dd.value or "OpenRouter (Бесплатно)")
-            set_setting("api_key", api_key_tf.value or "")
-            set_setting("level", level_dd.value or "A1-A2 (Начальный)")
-            set_setting("topic", topic_tf.value or "Путешествия и кафе")
-            set_setting("auto_tts", "1" if auto_tts_sw.value else "0")
-            show_snack("Настройки успешно сохранены!", ft.Colors.GREEN_700)
+            try:
+                set_setting("provider", provider_dd.value or "OpenRouter (Бесплатно)")
+                set_setting("api_key", api_key_tf.value or "")
+                set_setting("level", level_dd.value or "A1-A2 (Начальный)")
+                set_setting("topic", topic_tf.value or "Путешествия и кафе")
+                set_setting("auto_tts", "1" if auto_tts_sw.value else "0")
+                save_status_text.value = "✅ Настройки сохранены в память телефона!"
+                save_status_text.color = ft.Colors.GREEN_700
+                page.update()
+                show_snack("Настройки успешно сохранены!", ft.Colors.GREEN_700)
+            except Exception as ex:
+                save_status_text.value = f"❌ Ошибка сохранения: {ex}"
+                save_status_text.color = ft.Colors.RED_600
+                page.update()
 
         settings_view = ft.Column(
             [
@@ -515,8 +534,8 @@ async def main(page: ft.Page):
                             provider_dd,
                             api_key_tf,
                             ft.Text(
-                                "Подсказка: бесплатный ключ без привязки карты можно получить на openrouter.ai. "
-                                "Для голосового ввода используйте значок микрофона на клавиатуре вашего телефона.",
+                                "Бесплатный ключ (без карты) берется на openrouter.ai/settings/keys. "
+                                "Для РФ без VPN подходят ProxyAPI и VseGPT.",
                                 size=12,
                                 color=ft.Colors.GREY_700
                             ),
@@ -532,7 +551,8 @@ async def main(page: ft.Page):
                                 width=float("inf"),
                                 height=48,
                                 on_click=save_settings_click
-                            )
+                            ),
+                            save_status_text
                         ],
                         spacing=14,
                         scroll=ft.ScrollMode.AUTO
