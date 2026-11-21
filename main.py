@@ -1,6 +1,7 @@
 import os
 import re
 import json
+import base64
 import sqlite3
 import tempfile
 import asyncio
@@ -58,7 +59,7 @@ def get_setting(key: str) -> str:
     cursor.execute("SELECT value FROM settings WHERE key = ?", (key,))
     row = cursor.fetchone()
     conn.close()
-    return str(row[0]) if row and row[0] is not None else ""
+    return str(row) if row and row is not None else ""
 
 
 def set_setting(key: str, value: str):
@@ -68,16 +69,25 @@ def set_setting(key: str, value: str):
     conn.commit()
     conn.close()
 
+
 def get_ai_config() -> tuple[str, str, str]:
     provider = get_setting("provider")
     api_key = get_setting("api_key").strip()
 
+    # if provider == "ProxyAPI":
+        # return "https://proxyapi.ru", api_key, "openai/gpt-4o-mini"
+    # elif provider == "VseGPT":
+        # return "https://vsegpt.ru", api_key, "openai/gpt-4o-mini"
+    # else:
+        # return "https://openrouter.ai", api_key, "openrouter/free"
+
     if provider == "ProxyAPI":
         return "https://api.proxyapi.ru/v1", api_key, "openai/gpt-4o-mini"
     elif provider == "VseGPT":
-        return "https://vsegpt.ru", api_key, "openai/gpt-4o-mini"
+        return "https://api.vsegpt.ru/v1", api_key, "openai/gpt-4o-mini"
     else:
-        return "https://openrouter.ai", api_key, "openrouter/free"
+        return "https://openrouter.ai/api/v1", api_key, "openrouter/free"
+
 
 def _sync_ask_llm(messages: list[dict], temperature: float) -> str:
     base_url, api_key, model = get_ai_config()
@@ -102,8 +112,7 @@ def _sync_ask_llm(messages: list[dict], temperature: float) -> str:
             data = json.loads(raw)
             if "error" in data:
                 raise RuntimeError(str(data["error"]))
-            #return data["choices"]["message"]["content"].strip()
-            return data["choices"][0]["message"]["content"].strip()
+            return data["choices"]["message"]["content"].strip()
     except urllib.error.HTTPError as e:
         err_body = e.read().decode("utf-8", errors="ignore")
         raise RuntimeError(f"Ошибка сервера {e.code}: {err_body[:200]}")
@@ -113,20 +122,23 @@ async def ask_llm(messages: list[dict], temperature: float = 0.7) -> str:
     return await asyncio.to_thread(_sync_ask_llm, messages, temperature)
 
 
-def _sync_download_tts(clean_text: str, out_path: str):
-    normalized = " ".join(clean_text.split())
-    params = urllib.parse.urlencode({
-        "ie": "UTF-8",
-        "q": normalized[:200],
-        "tl": "en",
-        "client": "tw-ob"
-    })
-    url = f"https://google.com?{params}"
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    with urllib.request.urlopen(req, timeout=20) as resp:
-        with open(out_path, "wb") as f:
-            f.write(resp.read())
-
+def _sync_get_tts_base64(clean_text: str) -> str:
+    normalized = " ".join(clean_text.split())[:200]
+    urls = [
+        f"https://google.com?{urllib.parse.urlencode({'ie': 'UTF-8', 'q': normalized, 'tl': 'en', 'client': 'tw-ob'})}",
+        f"https://youdao.com?{urllib.parse.urlencode({'audio': normalized, 'type': '2'})}"
+    ]
+    last_err = None
+    for url in urls:
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                audio_bytes = resp.read()
+                if len(audio_bytes) > 200:
+                    return base64.b64encode(audio_bytes).decode("utf-8")
+        except Exception as e:
+            last_err = e
+    raise RuntimeError(f"Не удалось загрузить звук: {last_err}")
 
 
 def build_system_prompt() -> str:
@@ -150,6 +162,8 @@ def extract_english_part(text: str) -> str:
     cleaned = re.sub(r'\(.*?\)', '', text, flags=re.DOTALL)
     cleaned = cleaned.replace("**", "").strip()
     return cleaned
+
+
 ##########
 async def main(page: ft.Page):
     try:
@@ -168,26 +182,28 @@ async def main(page: ft.Page):
                 page.snack_bar.open = True
                 page.update()
 
+        chat_list = ft.ListView(expand=True, spacing=12, padding=15, auto_scroll=True)
+
         async def speak_text(english_text: str):
             clean_text = extract_english_part(english_text)
             if not clean_text:
                 return
             try:
-                tts_file = os.path.join(tempfile.gettempdir(), f"tts_{abs(hash(clean_text))}.mp3")
-                if not os.path.exists(tts_file):
-                    await asyncio.to_thread(_sync_download_tts, clean_text, tts_file)
+                b64_audio = await asyncio.to_thread(_sync_get_tts_base64, clean_text)
 
                 for item in list(page.overlay):
                     if isinstance(item, fta.Audio):
                         page.overlay.remove(item)
 
-                player = fta.Audio(src=tts_file, autoplay=True)
+                player = fta.Audio(src_base64=b64_audio, autoplay=True)
                 page.overlay.append(player)
                 page.update()
             except Exception as e:
-                show_snack(f"Ошибка озвучки: {e}", ft.Colors.RED_600)
+                chat_list.controls.append(
+                    build_message_bubble("error", f"🔊 Ошибка озвучки: {e}")
+                )
+                page.update()
 
-        chat_list = ft.ListView(expand=True, spacing=12, padding=15, auto_scroll=True)
         user_input = ft.TextField(
             hint_text="Напишите или надиктуйте на EN...",
             expand=True,
@@ -283,6 +299,7 @@ async def main(page: ft.Page):
                 ],
                 alignment=ft.MainAxisAlignment.END if is_user else ft.MainAxisAlignment.START
             )
+
 ##########
         def load_chat_history():
             chat_list.controls.clear()
