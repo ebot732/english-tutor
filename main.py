@@ -1,259 +1,600 @@
-import flet as ft
-import flet_audio_recorder as far
-import flet_audio as fa
-from openai import OpenAI
-import json
 import os
 import re
+import sqlite3
+import tempfile
+import asyncio
+import flet as ft
+from openai import AsyncOpenAI
+from gtts import gTTS
 
-SYSTEM_PROMPT = """
-Ты — дружелюбный репетитор английского языка. Твой ученик имеет начальный уровень (Beginner / A1).
-Веди с ним простой диалог на тему АВТОМОБИЛЕЙ (покупка машины, автосервис, заправка, устройство авто, вождение).
-Правила:
-1. Пиши короткие и простые фразы на английском (1-2 предложения), используй базовую лексику (car, wheel, engine, gas, drive, repair, fast, red).
-2. После своей реплики на английском, с новой строки в скобках дай её перевод на русский.
-3. Если ученик допустил ошибку в грамматике, выборе слов или произношении (судя по транскрибации), сначала мягко поправь его на русском языке, объясни как правильно, а затем продолжи диалог.
-4. Всегда заканчивай свой ответ простым вопросом, чтобы ученик мог продолжить разговор.
-"""
+STORAGE_DIR = os.getenv("FLET_APP_STORAGE_DATA", ".")
+DB_PATH = os.path.join(STORAGE_DIR, "tutor_data.db")
 
-def main(page: ft.Page):
-    page.title = "Auto English AI"
+
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            role TEXT,
+            content TEXT
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS dictionary (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            word TEXT UNIQUE,
+            translation TEXT
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        )
+    """)
+    defaults = {
+        "provider": "OpenRouter (Бесплатно)",
+        "api_key": "",
+        "level": "A1-A2 (Начальный)",
+        "topic": "Путешествия и кафе",
+        "auto_tts": "1"
+    }
+    for k, v in defaults.items():
+        cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (k, v))
+    conn.commit()
+    conn.close()
+
+
+def get_setting(key: str) -> str:
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT value FROM settings WHERE key = ?", (key,))
+    row = cursor.fetchone()
+    conn.close()
+    return row[0] if row else ""
+
+
+def set_setting(key: str, value: str):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, value))
+    conn.commit()
+    conn.close()
+
+
+def get_ai_client() -> tuple[AsyncOpenAI, str]:
+    provider = get_setting("provider")
+    api_key = get_setting("api_key").strip()
+
+    if provider == "ProxyAPI":
+        return AsyncOpenAI(
+            api_key=api_key or "empty",
+            base_url="https://proxyapi.ru"
+        ), "gpt-4o-mini"
+    elif provider == "VseGPT":
+        return AsyncOpenAI(
+            api_key=api_key or "empty",
+            base_url="https://vsegpt.ru"
+        ), "openai/gpt-4o-mini"
+    else:
+        return AsyncOpenAI(
+            api_key=api_key or "empty",
+            base_url="https://openrouter.ai"
+        ), "meta-llama/llama-3.2-3b-instruct:free"
+
+
+def build_system_prompt() -> str:
+    level = get_setting("level")
+    topic = get_setting("topic")
+    return (
+        f"Ты дружелюбный репетитор английского языка. Уровень ученика: {level}.\n"
+        f"Веди с ним простой диалог на выбранную тему: {topic}.\n"
+        "Правила:\n"
+        "1. Пиши короткие и простые фразы на английском (1-2 предложения), используй базовую лексику.\n"
+        "2. После своей реплики на английском, с новой строки в скобках дай её перевод на русский.\n"
+        "   ВАЖНО: Если в своей реплике ты используешь новое для ученика слово (не из базовой лексики), "
+        "выдели его двойными звёздочками, например: **delicious**.\n"
+        "3. Если ученик допустил ошибку в грамматике, выборе слов или произношении (судя по транскрибации), "
+        "сначала мягко поправь его на русском языке, объясни как правильно, а затем продолжи диалог.\n"
+        "4. Всегда заканчивай свой ответ простым вопросом, чтобы ученик мог продолжить разговор."
+    )
+
+
+def extract_english_part(text: str) -> str:
+    cleaned = re.sub(r'\(.*?\)', '', text, flags=re.DOTALL)
+    cleaned = cleaned.replace("**", "").strip()
+    return cleaned
+
+async def main(page: ft.Page):
+    init_db()
+
+    page.title = "English AI Tutor"
     page.theme_mode = ft.ThemeMode.LIGHT
-    page.padding = 10
+    page.padding = 0
+    page.bgcolor = "#F4F6F9"
 
-    # Загружаем сохраненные настройки и словарь из памяти телефона
-    saved_key = page.client_storage.get("api_key") or ""
-    saved_url = page.client_storage.get("base_url") or "https://proxyapi.ru"
-    vocab_list = page.client_storage.get("vocab") or [
-        {"en": "Engine", "ru": "Двигатель"},
-        {"en": "Steering wheel", "ru": "Руль"},
-        {"en": "Gas station", "ru": "Заправка"}
-    ]
-
-    messages_history = [{"role": "system", "content": SYSTEM_PROMPT}]
-    audio_rec_path = "user_voice.m4a"
-    tts_audio_path = "tutor_voice.mp3"
-
-    def get_client():
-        key = page.client_storage.get("api_key")
-        url = page.client_storage.get("base_url") or "https://proxyapi.ru"
-        if not key:
-            return None
-        return OpenAI(api_key=key, base_url=url)
-
-    # --- АУДИОПЛЕЕР ДЛЯ ОЗВУЧКИ УЧИТЕЛЯ ---
-    audio_player = fa.Audio(autoplay=True)
+    audio_player = ft.Audio(autoplay=True)
     page.overlay.append(audio_player)
 
-    def speak_text(full_text: str):
-        client = get_client()
-        if not client:
-            return
-        # Вырезаем русский перевод в скобках, чтобы озвучивать только английский текст
-        en_only = re.sub(r'\(.*?\)', '', full_text).strip()
-        if not en_only:
-            en_only = full_text
+    is_recording = False
+    temp_record_path = os.path.join(tempfile.gettempdir(), "user_voice.m4a")
 
-        status_text.value = "🔊 Генерирую голос учителя..."
+    audio_recorder = ft.AudioRecorder(
+        audio_encoder=ft.AudioEncoder.AAC,
+    )
+    page.overlay.append(audio_recorder)
+
+    def show_snack(msg: str, color: str = ft.colors.BLUE_700):
+        page.snack_bar = ft.SnackBar(ft.Text(msg, color=ft.colors.WHITE), bgcolor=color)
+        page.snack_bar.open = True
         page.update()
+
+    async def speak_text(english_text: str):
+        clean_text = extract_english_part(english_text)
+        if not clean_text:
+            return
         try:
-            response = client.audio.speech.create(
-                model="tts-1",
-                voice="alloy",  # Приятный нейтральный голос (можно выбрать nova, echo, shimmer)
-                input=en_only
-            )
-            response.stream_to_file(tts_audio_path)
-            audio_player.src = tts_audio_path
+            tts_file = os.path.join(tempfile.gettempdir(), f"tts_{abs(hash(clean_text))}.mp3")
+            if not os.path.exists(tts_file):
+                def _gen():
+                    tts = gTTS(text=clean_text, lang="en")
+                    tts.save(tts_file)
+                await asyncio.to_thread(_gen)
+
+            audio_player.src = tts_file
             audio_player.update()
             audio_player.play()
-            status_text.value = "Готово! Ваша очередь."
         except Exception as e:
-            status_text.value = f"Ошибка озвучки: {e}"
-        page.update()
+            show_snack(f"Ошибка озвучки: {e}", ft.colors.RED_600)
 
-    # --- ДИАЛОГ БЫСТРОГО ДОБАВЛЕНИЯ В СЛОВАРЬ ---
-    quick_en = ft.TextField(label="Слово на английском")
-    quick_ru = ft.TextField(label="Перевод на русский")
-
-    def save_quick_word(e):
-        if quick_en.value.strip() and quick_ru.value.strip():
-            vocab_list.insert(0, {"en": quick_en.value.strip(), "ru": quick_ru.value.strip()})
-            page.client_storage.set("vocab", vocab_list)
-            refresh_vocab_ui()
-            quick_en.value = ""
-            quick_ru.value = ""
-            page.close(quick_dialog)
-            page.snack_bar = ft.SnackBar(ft.Text("Слово сохранено в словарь!"))
-            page.snack_bar.open = True
-            page.update()
-
-    quick_dialog = ft.AlertDialog(
-        title=ft.Text("Добавить слово в словарь"),
-        content=ft.Column([quick_en, quick_ru], tight=True),
-        actions=[
-            ft.TextButton("Отмена", on_click=lambda e: page.close(quick_dialog)),
-            ft.ElevatedButton("Сохранить", on_click=save_quick_word)
-        ]
+    chat_list = ft.ListView(expand=True, spacing=12, padding=15, auto_scroll=True)
+    user_input = ft.TextField(
+        hint_text="Напишите ответ на английском...",
+        expand=True,
+        border_radius=20,
+        bgcolor=ft.colors.WHITE,
+        content_padding=ft.padding.symmetric(horizontal=16, vertical=10),
+        on_submit=lambda e: asyncio.create_task(send_message(user_input.value))
     )
+    loading_indicator = ft.ProgressBar(visible=False, color=ft.colors.BLUE_600)
 
-    # --- ВКЛАДКА 1: ЧАТ-ТРЕНАЖЕР ---
-    chat_list = ft.ListView(expand=True, spacing=10, auto_scroll=True)
-    status_text = ft.Text("Нажмите микрофон и говорите...", color=ft.Colors.GREY_600, size=12)
-
-    def add_message(sender: str, text: str, is_user: bool):
-        controls = [
-            ft.Text(sender, weight=ft.FontWeight.BOLD, size=12,
-                    color=ft.Colors.BLUE_700 if not is_user else ft.Colors.GREEN_700),
-            ft.Text(text, selectable=True, size=15)
-        ]
-        # Кнопки озвучки и сохранения слова добавляем к сообщениям учителя
-        if not is_user:
-            controls.append(
-                ft.Row([
-                    ft.TextButton("🔊 Прослушать", on_click=lambda e, t=text: speak_text(t)),
-                    ft.TextButton("➕ В словарь", on_click=lambda e: page.open(quick_dialog))
-                ])
+    async def save_word_to_dict(word: str):
+        word_clean = re.sub(r'[^\w\s-]', '', word).strip().lower()
+        if not word_clean:
+            return
+        show_snack(f"Перевожу и сохраняю «{word_clean}»...")
+        try:
+            client, model = get_ai_client()
+            resp = await client.chat.completions.create(
+                model=model,
+                messages=[{
+                    "role": "user",
+                    "content": f"Дай только перевод на русский язык для английского слова '{word_clean}' (1-2 слова, без лишнего текста)."
+                }]
             )
+            translation = resp.choices[0].message.content.strip()
+        except Exception:
+            translation = "Перевод не получен (проверьте API)"
 
-        chat_list.controls.append(
-            ft.Container(
-                content=ft.Column(controls, spacing=5),
-                bgcolor=ft.Colors.BLUE_50 if not is_user else ft.Colors.GREEN_50,
-                padding=12,
-                border_radius=12,
-            )
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT OR REPLACE INTO dictionary (word, translation) VALUES (?, ?)",
+            (word_clean, translation)
         )
-        page.update()
+        conn.commit()
+        conn.close()
+        show_snack(f"Сохранено: {word_clean} — {translation}", ft.colors.GREEN_700)
+        load_dictionary()
 
-    def ask_tutor(user_text: str):
-        client = get_client()
-        if not client:
-            add_message("Система:", "⚠️ Сначала введите API-ключ во вкладке «Настройки»!", is_user=False)
+    def build_message_bubble(role: str, content: str):
+        is_user = (role == "user")
+        new_words = re.findall(r'\*\*(.*?)\*\*', content) if not is_user else []
+
+        word_chips = []
+        for w in set(new_words):
+            word_chips.append(
+                ft.ElevatedButton(
+                    text=f"+ {w}",
+                    icon=ft.icons.BOOKMARK_ADD_OUTLINED,
+                    style=ft.ButtonStyle(
+                        padding=ft.padding.symmetric(horizontal=10, vertical=4),
+                        bgcolor=ft.colors.AMBER_100,
+                        color=ft.colors.BLACK87,
+                    ),
+                    on_click=lambda e, word=w: asyncio.create_task(save_word_to_dict(word))
+                )
+            )
+
+        bubble_controls = [
+            ft.Text(
+                content.replace("**", ""),
+                color=ft.colors.WHITE if is_user else ft.colors.BLACK87,
+                size=15,
+                selectable=True
+            )
+        ]
+
+        if not is_user:
+            bubble_controls.append(
+                ft.Row(
+                    [
+                        ft.IconButton(
+                            icon=ft.icons.VOLUME_UP_ROUNDED,
+                            icon_color=ft.colors.BLUE_700,
+                            tooltip="Прослушать",
+                            on_click=lambda e, txt=content: asyncio.create_task(speak_text(txt))
+                        ),
+                        *word_chips
+                    ],
+                    wrap=True,
+                    spacing=5
+                )
+            )
+
+        return ft.Row(
+            [
+                ft.Container(
+                    content=ft.Column(bubble_controls, spacing=6),
+                    bgcolor=ft.colors.BLUE_600 if is_user else ft.colors.WHITE,
+                    padding=14,
+                    border_radius=16,
+                    width=page.width * 0.82 if page.width else 300,
+                    shadow=ft.BoxShadow(blur_radius=4, color=ft.colors.BLACK12)
+                )
+            ],
+            alignment=ft.MainAxisAlignment.END if is_user else ft.MainAxisAlignment.START
+        )
+
+    def load_chat_history():
+        chat_list.controls.clear()
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT role, content FROM messages")
+        rows = cursor.fetchall()
+        conn.close()
+        for r, c in rows:
+            chat_list.controls.append(build_message_bubble(r, c))
+
+    async def send_message(text: str):
+        text = text.strip()
+        if not text:
             return
 
-        status_text.value = "Учитель думает..."
+        if not get_setting("api_key"):
+            show_snack("Сначала укажите API-ключ во вкладке «Настройки»!", ft.colors.RED_600)
+            return
+
+        user_input.value = ""
+        loading_indicator.visible = True
+
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("INSERT INTO messages (role, content) VALUES (?, ?)", ("user", text))
+        conn.commit()
+
+        cursor.execute("SELECT role, content FROM messages ORDER BY id DESC LIMIT 12")
+        history = [{"role": r, "content": c} for r, c in reversed(cursor.fetchall())]
+        conn.close()
+
+        chat_list.controls.append(build_message_bubble("user", text))
         page.update()
-        messages_history.append({"role": "user", "content": user_text})
+
         try:
-            response = client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=messages_history,
+            client, model = get_ai_client()
+            messages_payload = [{"role": "system", "content": build_system_prompt()}] + history
+            response = await client.chat.completions.create(
+                model=model,
+                messages=messages_payload,
                 temperature=0.7
             )
-            reply = response.choices.message.content
-            messages_history.append({"role": "assistant", "content": reply})
-            add_message("Учитель (Auto AI):", reply, is_user=False)
-        except Exception as e:
-            add_message("Ошибка API:", str(e), is_user=False)
+            ai_reply = response.choices[0].message.content.strip()
 
-        status_text.value = "Готово! Ваша очередь говорить."
-        page.update()
+            conn = sqlite3.connect(DB_PATH)
+            cursor = conn.cursor()
+            cursor.execute("INSERT INTO messages (role, content) VALUES (?, ?)", ("assistant", ai_reply))
+            conn.commit()
+            conn.close()
 
-    def process_audio():
-        client = get_client()
-        if not client:
-            return
-        status_text.value = "Проверяю ваше произношение..."
-        page.update()
-        try:
-            with open(audio_rec_path, "rb") as audio_file:
-                transcript = client.audio.transcriptions.create(
-                    model="whisper-1",
-                    file=audio_file,
-                    language="en",
-                    prompt="Transcribe literally what the beginner student says about cars, keeping mispronunciations."
-                )
-            recognized_text = transcript.text
-            add_message("Вы сказали:", recognized_text, is_user=True)
-            ask_tutor(f"Ученик сказал вслух (распознано ИИ): '{recognized_text}'. Проверь ошибки и ответь.")
-        except Exception as e:
-            status_text.value = f"Ошибка микрофона/API: {e}"
+            chat_list.controls.append(build_message_bubble("assistant", ai_reply))
+            loading_indicator.visible = False
             page.update()
 
-    audio_recorder = far.AudioRecorder(audio_encoder=far.AudioEncoder.AAC)
-    page.overlay.append(audio_recorder)
-    is_recording = False
+            if get_setting("auto_tts") == "1":
+                await speak_text(ai_reply)
 
-    def toggle_record(e):
+        except Exception as ex:
+            loading_indicator.visible = False
+            page.update()
+            show_snack(f"Ошибка ИИ: {ex}", ft.colors.RED_600)
+
+    async def toggle_recording(e):
         nonlocal is_recording
+        provider = get_setting("provider")
+        if provider == "OpenRouter (Бесплатно)":
+            show_snack("Голосовой ввод (Whisper) работает через ProxyAPI или VseGPT.", ft.colors.ORANGE_700)
+            return
+
         if not is_recording:
-            audio_recorder.start_recording(audio_rec_path)
+            has_perm = await audio_recorder.has_permission_async()
+            if not has_perm:
+                show_snack("Нет разрешения на использование микрофона!", ft.colors.RED_600)
+                return
             is_recording = True
-            mic_btn.text = "⏹ Остановить и отправить"
-            mic_btn.bgcolor = ft.Colors.RED_600
-            status_text.value = "Идет запись... Говорите на английском!"
+            mic_button.icon = ft.icons.STOP_CIRCLE
+            mic_button.icon_color = ft.colors.RED_600
+            show_snack("Говорите по-английски... Нажмите снова для отправки.", ft.colors.RED_700)
+            page.update()
+            await audio_recorder.start_recording_async(output_path=temp_record_path)
         else:
-            audio_recorder.stop_recording()
             is_recording = False
-            mic_btn.text = "🎤 Говорить (Запись)"
-            mic_btn.bgcolor = ft.Colors.BLUE_600
-            process_audio()
+            mic_button.icon = ft.icons.MIC_ROUNDED
+            mic_button.icon_color = ft.colors.BLUE_600
+            loading_indicator.visible = True
+            page.update()
+
+            await audio_recorder.stop_recording_async()
+            try:
+                client, _ = get_ai_client()
+                with open(temp_record_path, "rb") as audio_file:
+                    transcript = await client.audio.transcriptions.create(
+                        model="whisper-1",
+                        file=audio_file,
+                        language="en"
+                    )
+                recognized_text = transcript.text.strip()
+                if recognized_text:
+                    await send_message(f"[Голосовой ответ]: {recognized_text}")
+                else:
+                    show_snack("Речь не распознана, попробуйте громче.", ft.colors.ORANGE_700)
+            except Exception as ex:
+                show_snack(f"Ошибка распознавания речи: {ex}", ft.colors.RED_600)
+            finally:
+                loading_indicator.visible = False
+                page.update()
+
+    async def clear_chat(e):
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM messages")
+        conn.commit()
+        conn.close()
+        chat_list.controls.clear()
         page.update()
+        show_snack("История диалога очищена")
 
-    text_input = ft.TextField(hint_text="Или напишите ответ...", expand=True)
-
-    def send_text(e):
-        if text_input.value.strip():
-            msg = text_input.value
-            text_input.value = ""
-            add_message("Вы написали:", msg, is_user=True)
-            ask_tutor(msg)
-
-    mic_btn = ft.ElevatedButton(
-        "🎤 Говорить (Запись)",
-        on_click=toggle_record,
-        bgcolor=ft.Colors.BLUE_600,
-        color=ft.Colors.WHITE,
-        height=48,
-        expand=True
+    mic_button = ft.IconButton(
+        icon=ft.icons.MIC_ROUNDED,
+        icon_color=ft.colors.BLUE_600,
+        tooltip="Голосовой ответ",
+        on_click=toggle_recording
     )
 
-    chat_tab = ft.Column([
-        chat_list,
-        status_text,
-        ft.Row([mic_btn]),
-        ft.Row([text_input, ft.IconButton(ft.Icons.SEND, on_click=send_text)])
-    ], expand=True)
+    chat_view = ft.Column(
+        [
+            ft.Container(
+                content=ft.Row(
+                    [
+                        ft.Text("Чат с репетитором", size=18, weight=ft.FontWeight.BOLD),
+                        ft.IconButton(
+                            icon=ft.icons.DELETE_SWEEP_OUTLINED,
+                            tooltip="Начать диалог заново",
+                            on_click=clear_chat
+                        )
+                    ],
+                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN
+                ),
+                padding=ft.padding.symmetric(horizontal=16, vertical=8),
+                bgcolor=ft.colors.WHITE
+            ),
+            loading_indicator,
+            chat_list,
+            ft.Container(
+                content=ft.Row(
+                    [
+                        mic_button,
+                        user_input,
+                        ft.IconButton(
+                            icon=ft.icons.SEND_ROUNDED,
+                            icon_color=ft.colors.BLUE_600,
+                            on_click=lambda e: asyncio.create_task(send_message(user_input.value))
+                        )
+                    ],
+                    spacing=4
+                ),
+                padding=10,
+                bgcolor=ft.colors.WHITE
+            )
+        ],
+        expand=True,
+        spacing=0
+    )
 
-    # --- ВКЛАДКА 2: СЛОВАРЬ ---
-    vocab_col = ft.ListView(expand=True, spacing=8)
-    new_en_input = ft.TextField(label="Английское слово", expand=True)
-    new_ru_input = ft.TextField(label="Перевод", expand=True)
+    dict_list = ft.ListView(expand=True, spacing=8, padding=15)
 
-    def delete_word(idx):
-        vocab_list.pop(idx)
-        page.client_storage.set("vocab", vocab_list)
-        refresh_vocab_ui()
+    def delete_word(word_id: int):
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM dictionary WHERE id = ?", (word_id,))
+        conn.commit()
+        conn.close()
+        load_dictionary()
 
-    def refresh_vocab_ui():
-        vocab_col.controls.clear()
-        for i, item in enumerate(vocab_list):
-            vocab_col.controls.append(
-                ft.Card(
-                    content=ft.ListTile(
-                        title=ft.Text(item["en"], weight=ft.FontWeight.BOLD),
-                        subtitle=ft.Text(item["ru"]),
-                        trailing=ft.Row([
-                            ft.IconButton(ft.Icons.VOLUME_UP, on_click=lambda e, w=item["en"]: speak_text(w)),
-                            ft.IconButton(ft.Icons.DELETE_OUTLINE, on_click=lambda e, idx=i: delete_word(idx))
-                        ], tight=True)
-                    )
+    def load_dictionary():
+        dict_list.controls.clear()
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, word, translation FROM dictionary ORDER BY id DESC")
+        rows = cursor.fetchall()
+        conn.close()
+
+        if not rows:
+            dict_list.controls.append(
+                ft.Container(
+                    content=ft.Text(
+                        "Словарь пока пуст.\nНажимайте на кнопки «+ слово» под ответами репетитора, чтобы сохранять новые слова!",
+                        text_align=ft.TextAlign.CENTER,
+                        color=ft.colors.GREY_600
+                    ),
+                    padding=30
                 )
             )
+        else:
+            for wid, word, trans in rows:
+                dict_list.controls.append(
+                    ft.Card(
+                        content=ft.ListTile(
+                            leading=ft.IconButton(
+                                icon=ft.icons.VOLUME_UP,
+                                icon_color=ft.colors.BLUE_600,
+                                on_click=lambda e, w=word: asyncio.create_task(speak_text(w))
+                            ),
+                            title=ft.Text(word, weight=ft.FontWeight.BOLD, size=16),
+                            subtitle=ft.Text(trans, size=14),
+                            trailing=ft.IconButton(
+                                icon=ft.icons.DELETE_OUTLINE,
+                                icon_color=ft.colors.RED_400,
+                                on_click=lambda e, i=wid: delete_word(i)
+                            )
+                        )
+                    )
+                )
         page.update()
 
-    def add_vocab_word(e):
-        if new_en_input.value.strip() and new_ru_input.value.strip():
-            vocab_list.insert(0, {"en": new_en_input.value.strip(), "ru": new_ru_input.value.strip()})
-            page.client_storage.set("vocab", vocab_list)
-            new_en_input.value = ""
-            new_ru_input.value = ""
-            refresh_vocab_ui()
+    dict_view = ft.Column(
+        [
+            ft.Container(
+                content=ft.Text("Мой словарь", size=18, weight=ft.FontWeight.BOLD),
+                padding=ft.padding.symmetric(horizontal=16, vertical=14),
+                bgcolor=ft.colors.WHITE,
+                width=float("inf")
+            ),
+            dict_list
+        ],
+        expand=True,
+        spacing=0,
+        visible=False
+    )
+    provider_dd = ft.Dropdown(
+        label="Провайдер ИИ",
+        value=get_setting("provider"),
+        options=[
+            ft.dropdown.Option("OpenRouter (Бесплатно)"),
+            ft.dropdown.Option("ProxyAPI"),
+            ft.dropdown.Option("VseGPT"),
+        ]
+    )
 
-    refresh_vocab_ui()
+    api_key_tf = ft.TextField(
+        label="API-ключ",
+        value=get_setting("api_key"),
+        password=True,
+        can_reveal_password=True,
+        hint_text="Вставьте ключ от OpenRouter, ProxyAPI или VseGPT"
+    )
 
-    vocab_tab = ft.Column([
-        ft.Text("Мой словарь автолюбителя", size=18, weight=ft.FontWeight.BOLD),
+    level_dd = ft.Dropdown(
+        label="Ваш уровень английского",
+        value=get_setting("level"),
+        options=[
+            ft.dropdown.Option("A1-A2 (Начальный)"),
+            ft.dropdown.Option("B1-B2 (Средний)"),
+            ft.dropdown.Option("C1 (Продвинутый)"),
+        ]
+    )
 
-# https://www.google.com/m?q=%D0%9D%D1%83%D0%B6%D0%BD%D0%BE+%D1%81%D0%BE%D0%B7%D0%B4%D0%B0%D1%82%D1%8C+%D0%BF%D1%80%D0%B8%D0%BB%D0%BE%D0%B6%D0%B5%D0%BD%D0%B8%D0%B5+%D0%B4%D0%BB%D1%8F+%D0%B0%D0%BD%D0%B4%D1%80%D0%BE%D0%B8%D0%B4+%D0%B2+%D0%B2%D0%B8%D0%B4%D0%B5+apk.+%D0%9E%D0%B1%D1%83%D1%87%D0%B0%D1%8E%D1%89%D0%B5%D0%B5+%D0%B0%D0%BD%D0%B3%D0%BB%D0%B8%D0%B9%D1%81%D0%BA%D0%BE%D0%BC%D1%83+%D1%8F%D0%B7%D1%8B%D0%BA%D1%83.%0A%D0%92+%D0%BD%D0%B5%D0%BC+%D0%B1%D1%83%D0%B4%D0%B5%D1%82+%D1%81%D0%BB%D0%BE%D0%B2%D0%B0%D1%80%D1%8C+%D0%B0%D0%BD%D0%B3%D0%BB%D0%B8%D0%B9%D1%81%D0%BA%D0%B8%D1%85+%D1%81%D0%BB%D0%BE%D0%B2+%D0%B8+%D0%BF%D1%80%D0%B5%D0%B4%D0%BB%D0%BE%D0%B6%D0%B5%D0%BD%D0%B8%D0%B9+%28%D1%81+%D0%B2%D0%BE%D0%B7%D0%BC%D0%BE%D0%B6%D0%BD%D0%BE%D1%81%D1%82%D1%8C%D1%8E+%D0%B4%D0%BE%D0%B1%D0%B0%D0%B2%D0%BB%D0%B5%D0%BD%D0%B8%D1%8F+%D0%BD%D0%BE%D0%B2%D1%8B%D1%85+%D1%81%D0%BB%D0%BE%D0%B2+%D0%B8+%D1%82%D0%B4%29.%0A%D0%97%D0%B0+%D1%83%D1%80%D0%BE%D0%BA+%D0%B1%D1%83%D0%B4%D0%B5%D1%82+%D0%BF%D1%80%D0%B5%D0%B4%D0%BB%D0%BE%D0%B6%D0%B5%D0%BD%D0%BE+10+%D0%BD%D0%BE%D0%B2%D1%8B%D1%85+%D1%81%D0%BB%D0%BE%D0%B2%2C+%D0%B8%D1%85+%D0%BF%D0%B5%D1%80%D0%B5%D0%B2%D0%BE%D0%B4+%D0%BD%D0%B0+%D1%80%D1%83%D1%81%D1%81%D0%BA%D0%B8%D0%B9%2C+%D0%B8+%D0%BF%D1%80%D0%BE%D0%B2%D0%B5%D1%80%D0%BA%D0%B0+%D0%B7%D0%B2%D1%83%D1%87%D0%B0%D0%BD%D0%B8%D1%8F+%D0%BD%D0%B0+%D0%B0%D0%BD%D0%B3%D0%BB%D0%B8%D0%B9%D1%81%D0%BA%D0%BE%D0%BC%2C+%D0%BF%D1%80%D0%B8%D0%BB%D0%BE%D0%B6%D0%B5%D0%BD%D0%B8%D0%B5+%D0%B4%D0%BE%D0%BB%D0%B6%D0%BD%D0%BE+%D0%BF%D1%80%D0%BE%D0%B2%D0%B5%D1%80%D1%8F%D1%82%D1%8C+%D0%BF%D1%80%D0%BE%D0%B8%D0%B7%D0%BD%D0%BE%D1%88%D0%B5%D0%BD%D0%B8%D0%B5+%D0%B8+%D0%BF%D0%BE%D0%BF%D1%80%D0%B0%D0%B2%D0%BB%D1%8F%D1%82%D1%8C.%0A%D0%90+%D1%82%D0%B0%D0%BA%D0%B6%D0%B5+%D0%B7%D0%B0%D0%B4%D0%B0%D0%B2%D0%B0%D1%82%D1%8C+%D0%B2%D0%BE%D0%BF%D1%80%D0%BE%D1%81%D1%8B+%D0%BF%D0%BE+%D1%83%D1%80%D0%BE%D0%BA%D1%83+%D0%B8+%D0%BF%D1%80%D0%BE%D0%B2%D0%B5%D1%80%D1%8F%D1%82%D1%8C+%D0%BE%D1%82%D0%B2%D0%B5%D1%82%D1%8B+%D0%BF%D0%B8%D1%81%D1%8C%D0%BC%D0%B5%D0%BD%D0%BD%D1%8B%D0%B5+%D0%B8+%D1%83%D1%81%D1%82%D0%BD%D1%8B%D0%B5.%0A%D0%90+%D1%82%D0%B0%D0%BA%D0%B6%D0%B5+%D0%BC%D0%BE%D0%B4%D0%B5%D0%BB%D0%B8%D1%80%D0%BE%D0%B2%D0%B0%D1%82%D1%8C+%D0%B4%D0%B8%D0%B0%D0%BB%D0%BE%D0%B3%D0%B8+%D1%81+%D0%BE%D0%B1%D1%83%D1%87%D0%B0%D1%8E%D1%89%D0%B8%D0%BC%D1%81%D1%8F.%0A%D0%9E%D0%B1%D1%8A%D1%8F%D1%81%D0%BD%D0%B8+%D0%BF%D0%BE%D1%88%D0%B0%D0%B3%D0%BE%D0%B2%D0%BE%2C+%D0%BA%D0%B0%D0%BA+%D1%8D%D1%82%D0%BE+%D0%BC%D0%BE%D0%B6%D0%BD%D0%BE+%D1%80%D0%B5%D0%B0%D0%BB%D0%B8%D0%B7%D0%BE%D0%B2%D0%B0%D1%82%D1%8C%2C+%D0%BD%D0%B0+%D0%BA%D0%B0%D0%BA%D0%BE%D0%BC+%D1%8F%D0%B7%D1%8B%D0%BA%D0%B5+%D0%BF%D1%80%D0%BE%D0%BD%D1%80%D0%B0%D0%BC%D0%BC%D0%B8%D1%80%D0%BE%D0%B2%D0%B0%D0%BD%D0%B8%D1%8F%2C+%D0%B8%D1%81%D0%BF%D0%BE%D0%BB%D1%8C%D0%B7%D0%BE%D0%B2%D0%B0%D0%BD%D0%B8%D1%8F+%D0%B8%D0%B8+%D0%B8+%D1%82%D0%B4&client=ms-opera-mobile&channel=new&espv=1&mstk=AUtExfDzi-8Ed2HbSEZDWsZcDi6QomXQiDZ277SmQX3iTzTZttK0X1Mz-JDGf5B5xsw1OTg9XeuGO2untuteuBEXtmd3fzWwE0Yabf3y9bfDy6qYwZvD1uFvb6WEH4pLemb-Hmrg01hkp1swtHxuZJzaQjFX1eCMwOMmnVrCTeCTwIWQKIye2MGRLeRIg_HMhdKewQ3-erklWt3LwpTYFhd4-bHG1PBR_Q&csuir=1&udm=50&aioh=3#aof=1
-# Нужно создать приложение для андроид в виде apk. Обучающее английскому языку. В нем будет словарь английских слов и предложений (с возможностью добавления новых слов и тд). За урок будет предложено 10 новых слов, их перевод на русский, и проверка звучания на английском, приложение должно проверять произношение и поправлять. А также задавать вопросы по уроку и проверять ответы письменные и устные. А также моделировать диалоги с обучающимся. Объясни пошагово, как это можно реализовать, на каком языке пронраммирования, использования ии и тд
+    topic_tf = ft.TextField(
+        label="Тема диалога",
+        value=get_setting("topic"),
+        hint_text="Например: Заказ еды, Собеседование, Хобби"
+    )
+
+    auto_tts_sw = ft.Switch(
+        label="Автоматически озвучивать ответы учителя",
+        value=(get_setting("auto_tts") == "1")
+    )
+
+    def save_settings_click(e):
+        set_setting("provider", provider_dd.value)
+        set_setting("api_key", api_key_tf.value)
+        set_setting("level", level_dd.value)
+        set_setting("topic", topic_tf.value)
+        set_setting("auto_tts", "1" if auto_tts_sw.value else "0")
+        show_snack("Настройки сохранены!", ft.colors.GREEN_700)
+
+    settings_view = ft.Column(
+        [
+            ft.Container(
+                content=ft.Text("Настройки обучения и ИИ", size=18, weight=ft.FontWeight.BOLD),
+                padding=ft.padding.symmetric(horizontal=16, vertical=14),
+                bgcolor=ft.colors.WHITE,
+                width=float("inf")
+            ),
+            ft.Container(
+                padding=16,
+                content=ft.Column(
+                    [
+                        provider_dd,
+                        api_key_tf,
+                        ft.Text(
+                            "Подсказка: бесплатный ключ без привязки карты можно получить на openrouter.ai. "
+                            "Для голосового ввода (микрофона) выберите ProxyAPI или VseGPT.",
+                            size=12,
+                            color=ft.colors.GREY_700
+                        ),
+                        ft.Divider(),
+                        level_dd,
+                        topic_tf,
+                        auto_tts_sw,
+                        ft.ElevatedButton(
+                            "Сохранить настройки",
+                            icon=ft.icons.SAVE,
+                            bgcolor=ft.colors.BLUE_600,
+                            color=ft.colors.WHITE,
+                            width=float("inf"),
+                            height=48,
+                            on_click=save_settings_click
+                        )
+                    ],
+                    spacing=14,
+                    scroll=ft.ScrollMode.AUTO
+                ),
+                expand=True
+            )
+        ],
+        expand=True,
+        spacing=0,
+        visible=False
+    )
+
+    def on_nav_change(e):
+        idx = e.control.selected_index
+        chat_view.visible = (idx == 0)
+        dict_view.visible = (idx == 1)
+        settings_view.visible = (idx == 2)
+        if idx == 1:
+            load_dictionary()
+        page.update()
+
+    page.navigation_bar = ft.NavigationBar(
+        selected_index=0,
+        on_change=on_nav_change,
+        destinations=[
+            ft.NavigationBarDestination(icon=ft.icons.CHAT_BUBBLE_OUTLINE, selected_icon=ft.icons.CHAT_BUBBLE, label="Чат"),
+            ft.NavigationBarDestination(icon=ft.icons.BOOK_OUTLINED, selected_icon=ft.icons.BOOK, label="Словарь"),
+            ft.NavigationBarDestination(icon=ft.icons.SETTINGS_OUTLINED, selected_icon=ft.icons.SETTINGS, label="Настройки"),
+        ]
+    )
+
+    load_chat_history()
+    load_dictionary()
+
+    page.add(
+        ft.Stack([chat_view, dict_view, settings_view], expand=True)
+    )
+
+
+if __name__ == "__main__":
+    ft.app(target=main)
