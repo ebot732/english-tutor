@@ -112,7 +112,8 @@ def _sync_ask_llm(messages: list[dict], temperature: float) -> str:
             data = json.loads(raw)
             if "error" in data:
                 raise RuntimeError(str(data["error"]))
-            return data["choices"]["message"]["content"].strip()
+            #return data["choices"]["message"]["content"].strip()
+            return data["choices"][0]["message"]["content"].strip()
     except urllib.error.HTTPError as e:
         err_body = e.read().decode("utf-8", errors="ignore")
         raise RuntimeError(f"Ошибка сервера {e.code}: {err_body[:200]}")
