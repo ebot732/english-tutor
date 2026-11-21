@@ -3,44 +3,44 @@ name: Build Android APK
 on:
   push:
     branches: [ main ]
-  workflow_dispatch: # Позволяет запускать сборку вручную кнопкой на сайте GitHub
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Скачиваем код из репозитория
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Устанавливаем Python
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Устанавливаем Java (нужна для Android)
+      - name: Set up Java
         uses: actions/setup-java@v4
         with:
           distribution: 'zulu'
           java-version: '17'
 
-      - name: Устанавливаем Flutter
+      - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
           flutter-version: '3.24.0'
           channel: 'stable'
 
-      - name: Устанавливаем зависимости Python и Flet
+      - name: Install dependencies
         run: |
           pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Собираем APK
+      - name: Build APK
         run: |
-          flet build apk --project "EnglishTutor" --org "com.example.tutor"
+          flet build apk
 
-      - name: Загружаем готовый APK в артефакты
+      - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: app-release-apk
+          name: EnglishTutor-APK
           path: build/apk/*.apk
