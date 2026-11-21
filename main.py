@@ -7,6 +7,7 @@ import asyncio
 import traceback
 import urllib.request
 import urllib.parse
+import urllib.error
 import flet as ft
 import flet_audio as fta
 
@@ -57,13 +58,13 @@ def get_setting(key: str) -> str:
     cursor.execute("SELECT value FROM settings WHERE key = ?", (key,))
     row = cursor.fetchone()
     conn.close()
-    return row if row else ""
+    return str(row[0]) if row and row[0] is not None else ""
 
 
 def set_setting(key: str, value: str):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, value))
+    cursor.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, str(value)))
     conn.commit()
     conn.close()
 
@@ -86,6 +87,8 @@ def _sync_ask_llm(messages: list[dict], temperature: float) -> str:
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
+        "HTTP-Referer": "https://github.com",
+        "X-Title": "EnglishTutorApp",
         "User-Agent": "EnglishTutorApp/1.0"
     }
     payload = json.dumps({
@@ -95,9 +98,13 @@ def _sync_ask_llm(messages: list[dict], temperature: float) -> str:
     }).encode("utf-8")
 
     req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
-    with urllib.request.urlopen(req, timeout=45) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
-        return data["choices"]["message"]["content"].strip()
+    try:
+        with urllib.request.urlopen(req, timeout=45) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            return data["choices"][0]["message"]["content"].strip()
+    except urllib.error.HTTPError as e:
+        err_body = e.read().decode("utf-8", errors="ignore")
+        raise RuntimeError(f"HTTP {e.code}: {err_body[:150]}")
 
 
 async def ask_llm(messages: list[dict], temperature: float = 0.7) -> str:
@@ -124,7 +131,7 @@ def build_system_prompt() -> str:
         "2. После своей реплики на английском, с новой строки в скобках дай её перевод на русский.\n"
         "   ВАЖНО: Если в своей реплике ты используешь новое для ученика слово (не из базовой лексики), "
         "выдели его двойными звёздочками, например: **delicious**.\n"
-        "3. Если ученик допустил ошибку в грамматике, выборе слов или произношении (судя по транскрибации), "
+        "3. Если ученик допустил ошибку в грамматике, выборе слов или правописании, "
         "сначала мягко поправь его на русском языке, объясни как правильно, а затем продолжи диалог.\n"
         "4. Всегда заканчивай свой ответ простым вопросом, чтобы ученик мог продолжить разговор."
     )
@@ -134,8 +141,8 @@ def extract_english_part(text: str) -> str:
     cleaned = re.sub(r'\(.*?\)', '', text, flags=re.DOTALL)
     cleaned = cleaned.replace("**", "").strip()
     return cleaned
+###########
 
-#############
 async def main(page: ft.Page):
     try:
         init_db()
@@ -145,13 +152,8 @@ async def main(page: ft.Page):
         page.padding = 0
         page.bgcolor = "#F4F6F9"
 
-        # audio_player = fta.Audio(autoplay=True)
-        # page.overlay.append(audio_player)
-
         def show_snack(msg: str, color: str = ft.Colors.BLUE_700):
-            page.snack_bar = ft.SnackBar(ft.Text(msg, color=ft.Colors.WHITE), bgcolor=color)
-            page.snack_bar.open = True
-            page.update()
+            page.open(ft.SnackBar(ft.Text(msg, color=ft.Colors.WHITE), bgcolor=color))
 
         async def speak_text(english_text: str):
             clean_text = extract_english_part(english_text)
@@ -161,14 +163,16 @@ async def main(page: ft.Page):
                 tts_file = os.path.join(tempfile.gettempdir(), f"tts_{abs(hash(clean_text))}.mp3")
                 if not os.path.exists(tts_file):
                     await asyncio.to_thread(_sync_download_tts, clean_text, tts_file)
-    
-                page.overlay.clear()
+
+                for item in list(page.overlay):
+                    if isinstance(item, fta.Audio):
+                        page.overlay.remove(item)
+
                 player = fta.Audio(src=tts_file, autoplay=True)
                 page.overlay.append(player)
                 page.update()
             except Exception as e:
                 show_snack(f"Ошибка озвучки: {e}", ft.Colors.RED_600)
-
 
         chat_list = ft.ListView(expand=True, spacing=12, padding=15, auto_scroll=True)
         user_input = ft.TextField(
@@ -264,7 +268,7 @@ async def main(page: ft.Page):
                 alignment=ft.MainAxisAlignment.END if is_user else ft.MainAxisAlignment.START
             )
 
-########
+################
 
         def load_chat_history():
             chat_list.controls.clear()
@@ -277,11 +281,11 @@ async def main(page: ft.Page):
                 chat_list.controls.append(build_message_bubble(r, c))
 
         async def send_message(text: str):
-            text = text.strip()
+            text = (text or "").strip()
             if not text:
                 return
 
-            if not get_setting("api_key"):
+            if not get_setting("api_key").strip():
                 show_snack("Сначала укажите API-ключ во вкладке «Настройки»!", ft.Colors.RED_600)
                 return
 
@@ -332,6 +336,10 @@ async def main(page: ft.Page):
             page.update()
             show_snack("История диалога очищена")
 
+        async def mic_button_click(e):
+            await user_input.focus()
+            show_snack("Нажмите значок микрофона на открывшейся клавиатуре, чтобы надиктовать по-английски!", ft.Colors.BLUE_700)
+
         chat_view = ft.Column(
             [
                 ft.Container(
@@ -354,6 +362,12 @@ async def main(page: ft.Page):
                 ft.Container(
                     content=ft.Row(
                         [
+                            ft.IconButton(
+                                icon=ft.Icons.MIC_ROUNDED,
+                                icon_color=ft.Colors.BLUE_600,
+                                tooltip="Голосовой ввод",
+                                on_click=mic_button_click
+                            ),
                             user_input,
                             ft.IconButton(
                                 icon=ft.Icons.SEND_ROUNDED,
@@ -437,7 +451,7 @@ async def main(page: ft.Page):
             visible=False
         )
 
-####
+##########
 
         provider_dd = ft.Dropdown(
             label="Провайдер ИИ",
@@ -479,12 +493,12 @@ async def main(page: ft.Page):
         )
 
         def save_settings_click(e):
-            set_setting("provider", provider_dd.value)
-            set_setting("api_key", api_key_tf.value)
-            set_setting("level", level_dd.value)
-            set_setting("topic", topic_tf.value)
+            set_setting("provider", provider_dd.value or "OpenRouter (Бесплатно)")
+            set_setting("api_key", api_key_tf.value or "")
+            set_setting("level", level_dd.value or "A1-A2 (Начальный)")
+            set_setting("topic", topic_tf.value or "Путешествия и кафе")
             set_setting("auto_tts", "1" if auto_tts_sw.value else "0")
-            show_snack("Настройки сохранены!", ft.Colors.GREEN_700)
+            show_snack("Настройки успешно сохранены!", ft.Colors.GREEN_700)
 
         settings_view = ft.Column(
             [
@@ -502,7 +516,7 @@ async def main(page: ft.Page):
                             api_key_tf,
                             ft.Text(
                                 "Подсказка: бесплатный ключ без привязки карты можно получить на openrouter.ai. "
-                                "Для голосового ввода используйте кнопку микрофона на клавиатуре вашего телефона.",
+                                "Для голосового ввода используйте значок микрофона на клавиатуре вашего телефона.",
                                 size=12,
                                 color=ft.Colors.GREY_700
                             ),
