@@ -8,10 +8,8 @@ requires-python = ">=3.10"
 org = "com.aitutor"
 product = "English Tutor"
 
-[tool.flet.android]
-permission = [
-    "android.permission.INTERNET",
-    "android.permission.RECORD_AUDIO",
-    "android.permission.WRITE_EXTERNAL_STORAGE",
-    "android.permission.READ_EXTERNAL_STORAGE"
-]
+[tool.flet.android.permission]
+"android.permission.INTERNET" = true
+"android.permission.RECORD_AUDIO" = true
+"android.permission.WRITE_EXTERNAL_STORAGE" = true
+"android.permission.READ_EXTERNAL_STORAGE" = true
