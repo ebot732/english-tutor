@@ -177,13 +177,13 @@ async def main(page: ft.Page):
     audio_player = ft.Audio(autoplay=True)
     page.overlay.append(audio_player)
 
-    is_recording = False
-    temp_record_path = os.path.join(tempfile.gettempdir(), "user_voice.m4a")
+    # is_recording = False
+    # temp_record_path = os.path.join(tempfile.gettempdir(), "user_voice.m4a")
 
-    audio_recorder = ft.AudioRecorder(
-        audio_encoder=ft.AudioEncoder.AAC,
-    )
-    page.overlay.append(audio_recorder)
+    # audio_recorder = ft.AudioRecorder(
+        # audio_encoder=ft.AudioEncoder.AAC,
+    # )
+    # page.overlay.append(audio_recorder)
 
     def show_snack(msg: str, color: str = ft.colors.BLUE_700):
         page.snack_bar = ft.SnackBar(ft.Text(msg, color=ft.colors.WHITE), bgcolor=color)
@@ -358,43 +358,43 @@ async def main(page: ft.Page):
 
 
 ### 3.1
-    async def toggle_recording(e):
-        nonlocal is_recording
-        provider = get_setting("provider")
-        if provider == "OpenRouter (Бесплатно)":
-            show_snack("Голосовой ввод (Whisper) работает через ProxyAPI или VseGPT.", ft.colors.ORANGE_700)
-            return
+    # async def toggle_recording(e):
+        # nonlocal is_recording
+        # provider = get_setting("provider")
+        # if provider == "OpenRouter (Бесплатно)":
+            # show_snack("Голосовой ввод (Whisper) работает через ProxyAPI или VseGPT.", ft.colors.ORANGE_700)
+            # return
 
-        if not is_recording:
-            has_perm = await audio_recorder.has_permission_async()
-            if not has_perm:
-                show_snack("Нет разрешения на использование микрофона!", ft.colors.RED_600)
-                return
-            is_recording = True
-            mic_button.icon = ft.icons.STOP_CIRCLE
-            mic_button.icon_color = ft.colors.RED_600
-            show_snack("Говорите по-английски... Нажмите снова для отправки.", ft.colors.RED_700)
-            page.update()
-            await audio_recorder.start_recording_async(output_path=temp_record_path)
-        else:
-            is_recording = False
-            mic_button.icon = ft.icons.MIC_ROUNDED
-            mic_button.icon_color = ft.colors.BLUE_600
-            loading_indicator.visible = True
-            page.update()
+        # if not is_recording:
+            # has_perm = await audio_recorder.has_permission_async()
+            # if not has_perm:
+                # show_snack("Нет разрешения на использование микрофона!", ft.colors.RED_600)
+                # return
+            # is_recording = True
+            # mic_button.icon = ft.icons.STOP_CIRCLE
+            # mic_button.icon_color = ft.colors.RED_600
+            # show_snack("Говорите по-английски... Нажмите снова для отправки.", ft.colors.RED_700)
+            # page.update()
+            # await audio_recorder.start_recording_async(output_path=temp_record_path)
+        # else:
+            # is_recording = False
+            # mic_button.icon = ft.icons.MIC_ROUNDED
+            # mic_button.icon_color = ft.colors.BLUE_600
+            # loading_indicator.visible = True
+            # page.update()
 
-            await audio_recorder.stop_recording_async()
-            try:
-                recognized_text = await transcribe_audio(temp_record_path)
-                if recognized_text:
-                    await send_message(f"[Голосовой ответ]: {recognized_text}")
-                else:
-                    show_snack("Речь не распознана, попробуйте громче.", ft.colors.ORANGE_700)
-            except Exception as ex:
-                show_snack(f"Ошибка распознавания речи: {ex}", ft.colors.RED_600)
-            finally:
-                loading_indicator.visible = False
-                page.update()
+            # await audio_recorder.stop_recording_async()
+            # try:
+                # recognized_text = await transcribe_audio(temp_record_path)
+                # if recognized_text:
+                    # await send_message(f"[Голосовой ответ]: {recognized_text}")
+                # else:
+                    # show_snack("Речь не распознана, попробуйте громче.", ft.colors.ORANGE_700)
+            # except Exception as ex:
+                # show_snack(f"Ошибка распознавания речи: {ex}", ft.colors.RED_600)
+            # finally:
+                # loading_indicator.visible = False
+                # page.update()
 
 
     async def clear_chat(e):
@@ -407,12 +407,12 @@ async def main(page: ft.Page):
         page.update()
         show_snack("История диалога очищена")
 
-    mic_button = ft.IconButton(
-        icon=ft.icons.MIC_ROUNDED,
-        icon_color=ft.colors.BLUE_600,
-        tooltip="Голосовой ответ",
-        on_click=toggle_recording
-    )
+    # mic_button = ft.IconButton(
+        # icon=ft.icons.MIC_ROUNDED,
+        # icon_color=ft.colors.BLUE_600,
+        # tooltip="Голосовой ответ",
+        # on_click=toggle_recording
+    # )
 
     chat_view = ft.Column(
         [
@@ -436,7 +436,7 @@ async def main(page: ft.Page):
             ft.Container(
                 content=ft.Row(
                     [
-                        mic_button,
+                        #mic_button,
                         user_input,
                         ft.IconButton(
                             icon=ft.icons.SEND_ROUNDED,
