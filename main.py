@@ -58,7 +58,7 @@ def get_setting(key: str) -> str:
     cursor.execute("SELECT value FROM settings WHERE key = ?", (key,))
     row = cursor.fetchone()
     conn.close()
-    return str(row) if row and row is not None else ""
+    return str(row[0]) if row and row[0] is not None else ""
 
 
 def set_setting(key: str, value: str):
@@ -68,18 +68,16 @@ def set_setting(key: str, value: str):
     conn.commit()
     conn.close()
 
-
 def get_ai_config() -> tuple[str, str, str]:
     provider = get_setting("provider")
     api_key = get_setting("api_key").strip()
 
     if provider == "ProxyAPI":
-        return "https://api.proxyapi.ru/openai/v1", api_key, "gpt-4o-mini"
+        return "https://api.proxyapi.ru/v1", api_key, "openai/gpt-4o-mini"
     elif provider == "VseGPT":
-        return "https://api.vsegpt.ru/v1", api_key, "openai/gpt-4o-mini"
+        return "https://vsegpt.ru", api_key, "openai/gpt-4o-mini"
     else:
-        return "https://openrouter.ai/api/v1", api_key, "openrouter/free"
-
+        return "https://openrouter.ai", api_key, "openrouter/free"
 
 def _sync_ask_llm(messages: list[dict], temperature: float) -> str:
     base_url, api_key, model = get_ai_config()
@@ -104,7 +102,8 @@ def _sync_ask_llm(messages: list[dict], temperature: float) -> str:
             data = json.loads(raw)
             if "error" in data:
                 raise RuntimeError(str(data["error"]))
-            return data["choices"]["message"]["content"].strip()
+            #return data["choices"]["message"]["content"].strip()
+            return data["choices"][0]["message"]["content"].strip()
     except urllib.error.HTTPError as e:
         err_body = e.read().decode("utf-8", errors="ignore")
         raise RuntimeError(f"Ошибка сервера {e.code}: {err_body[:200]}")
