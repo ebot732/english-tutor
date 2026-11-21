@@ -59,7 +59,7 @@ def get_setting(key: str) -> str:
     cursor.execute("SELECT value FROM settings WHERE key = ?", (key,))
     row = cursor.fetchone()
     conn.close()
-    return str(row) if row and row is not None else ""
+    return str(row[0]) if row and row[0] is not None else ""
 
 
 def set_setting(key: str, value: str):
@@ -71,15 +71,8 @@ def set_setting(key: str, value: str):
 
 
 def get_ai_config() -> tuple[str, str, str]:
-    provider = get_setting("provider")
+    provider = get_setting("provider").strip()
     api_key = get_setting("api_key").strip()
-
-    # if provider == "ProxyAPI":
-        # return "https://proxyapi.ru", api_key, "openai/gpt-4o-mini"
-    # elif provider == "VseGPT":
-        # return "https://vsegpt.ru", api_key, "openai/gpt-4o-mini"
-    # else:
-        # return "https://openrouter.ai", api_key, "openrouter/free"
 
     if provider == "ProxyAPI":
         return "https://api.proxyapi.ru/v1", api_key, "openai/gpt-4o-mini"
@@ -112,11 +105,10 @@ def _sync_ask_llm(messages: list[dict], temperature: float) -> str:
             data = json.loads(raw)
             if "error" in data:
                 raise RuntimeError(str(data["error"]))
-            #return data["choices"]["message"]["content"].strip()
             return data["choices"][0]["message"]["content"].strip()
     except urllib.error.HTTPError as e:
         err_body = e.read().decode("utf-8", errors="ignore")
-        raise RuntimeError(f"Ошибка сервера {e.code}: {err_body[:200]}")
+        raise RuntimeError(f"Ошибка сервера {e.code} ({base_url}): {err_body[:200]}")
 
 
 async def ask_llm(messages: list[dict], temperature: float = 0.7) -> str:
@@ -135,7 +127,7 @@ def _sync_get_tts_base64(clean_text: str) -> str:
             req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
             with urllib.request.urlopen(req, timeout=10) as resp:
                 audio_bytes = resp.read()
-                if len(audio_bytes) > 200:
+                if len(audio_bytes) > 200 and not audio_bytes.lstrip().startswith(b"<"):
                     return base64.b64encode(audio_bytes).decode("utf-8")
         except Exception as e:
             last_err = e
@@ -164,8 +156,8 @@ def extract_english_part(text: str) -> str:
     cleaned = cleaned.replace("**", "").strip()
     return cleaned
 
+#############
 
-##########
 async def main(page: ft.Page):
     try:
         init_db()
@@ -199,6 +191,7 @@ async def main(page: ft.Page):
                 player = fta.Audio(src_base64=b64_audio, autoplay=True)
                 page.overlay.append(player)
                 page.update()
+                player.play()
             except Exception as e:
                 chat_list.controls.append(
                     build_message_bubble("error", f"🔊 Ошибка озвучки: {e}")
@@ -301,7 +294,8 @@ async def main(page: ft.Page):
                 alignment=ft.MainAxisAlignment.END if is_user else ft.MainAxisAlignment.START
             )
 
-##########
+#####
+
         def load_chat_history():
             chat_list.controls.clear()
             conn = sqlite3.connect(DB_PATH)
@@ -485,7 +479,9 @@ async def main(page: ft.Page):
             spacing=0,
             visible=False
         )
-########
+
+#########
+
         provider_dd = ft.Dropdown(
             label="Провайдер ИИ",
             value=get_setting("provider") or "OpenRouter (Бесплатно)",
@@ -558,7 +554,7 @@ async def main(page: ft.Page):
                             provider_dd,
                             api_key_tf,
                             ft.Text(
-                                "Бесплатный ключ (без карты) берется на openrouter.ai/settings/keys. "
+                                "Бесплатный ключ (без карты) берется на openrouter.ai/settings/keys (работает с VPN). "
                                 "Для РФ без VPN подходят ProxyAPI и VseGPT.",
                                 size=12,
                                 color=ft.Colors.GREY_700
