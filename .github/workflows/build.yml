@@ -1,9 +1,9 @@
 name: Build Android APK
 
 on:
-  workflow_dispatch: # Запуск вручную по кнопке на сайте
-  push:              # Или автоматический запуск при обновлении кода
+  push:
     branches: [ main ]
+  workflow_dispatch: # Позволяет запускать сборку вручную кнопкой на сайте GitHub
 
 jobs:
   build:
@@ -13,33 +13,34 @@ jobs:
       - name: Скачиваем код из репозитория
         uses: actions/checkout@v4
 
-      - name: Настраиваем Python 3.11 в облаке
+      - name: Устанавливаем Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Настраиваем Java 17
+      - name: Устанавливаем Java (нужна для Android)
         uses: actions/setup-java@v4
         with:
-          distribution: 'temurin'
+          distribution: 'zulu'
           java-version: '17'
 
-      - name: Настраиваем Flutter
+      - name: Устанавливаем Flutter
         uses: subosito/flutter-action@v2
         with:
+          flutter-version: '3.24.0'
           channel: 'stable'
 
-      - name: Устанавливаем Flet
+      - name: Устанавливаем зависимости Python и Flet
         run: |
-          python -m pip install --upgrade pip
-          pip install flet
+          pip install --upgrade pip
+          pip install -r requirements.txt
 
       - name: Собираем APK
         run: |
-          flet build apk --permissions android.permission.RECORD_AUDIO android.permission.INTERNET
+          flet build apk --project "EnglishTutor" --org "com.example.tutor"
 
-      - name: Сохраняем готовый APK для скачивания
+      - name: Загружаем готовый APK в артефакты
         uses: actions/upload-artifact@v4
         with:
-          name: AutoEnglish-APK
-          path: build/apk/app-release.apk
+          name: app-release-apk
+          path: build/apk/*.apk
