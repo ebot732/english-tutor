@@ -145,8 +145,8 @@ async def main(page: ft.Page):
         page.padding = 0
         page.bgcolor = "#F4F6F9"
 
-        audio_player = fta.Audio(autoplay=True)
-        page.overlay.append(audio_player)
+        # audio_player = fta.Audio(autoplay=True)
+        # page.overlay.append(audio_player)
 
         def show_snack(msg: str, color: str = ft.Colors.BLUE_700):
             page.snack_bar = ft.SnackBar(ft.Text(msg, color=ft.Colors.WHITE), bgcolor=color)
@@ -161,12 +161,14 @@ async def main(page: ft.Page):
                 tts_file = os.path.join(tempfile.gettempdir(), f"tts_{abs(hash(clean_text))}.mp3")
                 if not os.path.exists(tts_file):
                     await asyncio.to_thread(_sync_download_tts, clean_text, tts_file)
-
-                audio_player.src = tts_file
-                audio_player.update()
-                audio_player.play()
+    
+                page.overlay.clear()
+                player = fta.Audio(src=tts_file, autoplay=True)
+                page.overlay.append(player)
+                page.update()
             except Exception as e:
                 show_snack(f"Ошибка озвучки: {e}", ft.Colors.RED_600)
+
 
         chat_list = ft.ListView(expand=True, spacing=12, padding=15, auto_scroll=True)
         user_input = ft.TextField(
