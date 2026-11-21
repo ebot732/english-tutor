@@ -116,22 +116,52 @@ async def ask_llm(messages: list[dict], temperature: float = 0.7) -> str:
 
 
 def _sync_get_tts_base64(clean_text: str) -> str:
-    normalized = " ".join(clean_text.split())[:200]
-    urls = [
-        f"https://google.com?{urllib.parse.urlencode({'ie': 'UTF-8', 'q': normalized, 'tl': 'en', 'client': 'tw-ob'})}",
-        f"https://youdao.com?{urllib.parse.urlencode({'audio': normalized, 'type': '2'})}"
-    ]
-    last_err = None
-    for url in urls:
+    normalized = " ".join(clean_text.split())[:400]
+    base_url, api_key, _ = get_ai_config()
+    provider = get_setting("provider").strip()
+
+    # 1. Если выбран ProxyAPI или VseGPT — используем качественную живую озвучку OpenAI TTS
+    if provider in ("ProxyAPI", "VseGPT") and api_key:
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=10) as resp:
+            url = f"{base_url}/audio/speech"
+            headers = {
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+                "User-Agent": "EnglishTutorApp/1.0"
+            }
+            payload = json.dumps({
+                "model": "tts-1",
+                "input": normalized,
+                "voice": "nova",
+                "response_format": "mp3"
+            }).encode("utf-8")
+            req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
+            with urllib.request.urlopen(req, timeout=20) as resp:
                 audio_bytes = resp.read()
-                if len(audio_bytes) > 200 and not audio_bytes.lstrip().startswith(b"<"):
+                if len(audio_bytes) > 500:
                     return base64.b64encode(audio_bytes).decode("utf-8")
         except Exception as e:
-            last_err = e
-    raise RuntimeError(f"Не удалось загрузить звук: {last_err}")
+            last_err = f"TTS API: {e}"
+    else:
+        last_err = "Нет платного провайдера"
+
+    # 2. Резервный бесплатный синтезатор (StreamElements / Google)
+    free_urls = [
+        f"https://streamelements.com?{urllib.parse.urlencode({'voice': 'Brian', 'text': normalized[:200]})}",
+        f"https://google.com?{urllib.parse.urlencode({'ie': 'UTF-8', 'q': normalized[:200], 'tl': 'en', 'client': 'gtx'})}"
+    ]
+    for url in free_urls:
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+            with urllib.request.urlopen(req, timeout=12) as resp:
+                audio_bytes = resp.read()
+                if len(audio_bytes) > 500 and not audio_bytes.lstrip().startswith(b"<"):
+                    return base64.b64encode(audio_bytes).decode("utf-8")
+        except Exception as e:
+            last_err = str(e)
+
+    raise RuntimeError(last_err)
+
 
 
 def build_system_prompt() -> str:
@@ -191,7 +221,7 @@ async def main(page: ft.Page):
                 player = fta.Audio(src_base64=b64_audio, autoplay=True)
                 page.overlay.append(player)
                 page.update()
-                player.play()
+                #player.play()
             except Exception as e:
                 chat_list.controls.append(
                     build_message_bubble("error", f"🔊 Ошибка озвучки: {e}")
