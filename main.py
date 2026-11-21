@@ -3,8 +3,8 @@ import re
 import sqlite3
 import tempfile
 import asyncio
+import httpx
 import flet as ft
-from openai import AsyncOpenAI
 from gtts import gTTS
 
 STORAGE_DIR = os.getenv("FLET_APP_STORAGE_DATA", ".")
@@ -53,7 +53,7 @@ def get_setting(key: str) -> str:
     cursor.execute("SELECT value FROM settings WHERE key = ?", (key,))
     row = cursor.fetchone()
     conn.close()
-    return row[0] if row else ""
+    return row if row else ""
 
 
 def set_setting(key: str, value: str):
@@ -64,25 +64,46 @@ def set_setting(key: str, value: str):
     conn.close()
 
 
-def get_ai_client() -> tuple[AsyncOpenAI, str]:
+def get_ai_config() -> tuple[str, str, str]:
     provider = get_setting("provider")
     api_key = get_setting("api_key").strip()
 
     if provider == "ProxyAPI":
-        return AsyncOpenAI(
-            api_key=api_key or "empty",
-            base_url="https://proxyapi.ru"
-        ), "gpt-4o-mini"
+        return "https://proxyapi.ru", api_key, "gpt-4o-mini"
     elif provider == "VseGPT":
-        return AsyncOpenAI(
-            api_key=api_key or "empty",
-            base_url="https://vsegpt.ru"
-        ), "openai/gpt-4o-mini"
+        return "https://vsegpt.ru", api_key, "openai/gpt-4o-mini"
     else:
-        return AsyncOpenAI(
-            api_key=api_key or "empty",
-            base_url="https://openrouter.ai"
-        ), "meta-llama/llama-3.2-3b-instruct:free"
+        return "https://openrouter.ai", api_key, "meta-llama/llama-3.2-3b-instruct:free"
+
+
+async def ask_llm(messages: list[dict], temperature: float = 0.7) -> str:
+    base_url, api_key, model = get_ai_config()
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "model": model,
+        "messages": messages,
+        "temperature": temperature
+    }
+    async with httpx.AsyncClient(timeout=45.0) as client:
+        resp = await client.post(f"{base_url}/chat/completions", headers=headers, json=payload)
+        resp.raise_for_status()
+        data = resp.json()
+        return data["choices"]["message"]["content"].strip()
+
+
+async def transcribe_audio(file_path: str) -> str:
+    base_url, api_key, _ = get_ai_config()
+    headers = {"Authorization": f"Bearer {api_key}"}
+    async with httpx.AsyncClient(timeout=45.0) as client:
+        with open(file_path, "rb") as f:
+            files = {"file": ("voice.m4a", f, "audio/m4a")}
+            data = {"model": "whisper-1", "language": "en"}
+            resp = await client.post(f"{base_url}/audio/transcriptions", headers=headers, data=data, files=files)
+            resp.raise_for_status()
+            return resp.json().get("text", "").strip()
 
 
 def build_system_prompt() -> str:
@@ -106,6 +127,7 @@ def extract_english_part(text: str) -> str:
     cleaned = re.sub(r'\(.*?\)', '', text, flags=re.DOTALL)
     cleaned = cleaned.replace("**", "").strip()
     return cleaned
+
 
 async def main(page: ft.Page):
     init_db()
@@ -166,15 +188,10 @@ async def main(page: ft.Page):
             return
         show_snack(f"Перевожу и сохраняю «{word_clean}»...")
         try:
-            client, model = get_ai_client()
-            resp = await client.chat.completions.create(
-                model=model,
-                messages=[{
-                    "role": "user",
-                    "content": f"Дай только перевод на русский язык для английского слова '{word_clean}' (1-2 слова, без лишнего текста)."
-                }]
-            )
-            translation = resp.choices[0].message.content.strip()
+            translation = await ask_llm([{
+                "role": "user",
+                "content": f"Дай только перевод на русский язык для английского слова '{word_clean}' (1-2 слова, без лишнего текста)."
+            }], temperature=0.3)
         except Exception:
             translation = "Перевод не получен (проверьте API)"
 
@@ -283,14 +300,8 @@ async def main(page: ft.Page):
         page.update()
 
         try:
-            client, model = get_ai_client()
             messages_payload = [{"role": "system", "content": build_system_prompt()}] + history
-            response = await client.chat.completions.create(
-                model=model,
-                messages=messages_payload,
-                temperature=0.7
-            )
-            ai_reply = response.choices[0].message.content.strip()
+            ai_reply = await ask_llm(messages_payload, temperature=0.7)
 
             conn = sqlite3.connect(DB_PATH)
             cursor = conn.cursor()
@@ -310,6 +321,8 @@ async def main(page: ft.Page):
             page.update()
             show_snack(f"Ошибка ИИ: {ex}", ft.colors.RED_600)
 
+
+### 3.1
     async def toggle_recording(e):
         nonlocal is_recording
         provider = get_setting("provider")
@@ -337,14 +350,7 @@ async def main(page: ft.Page):
 
             await audio_recorder.stop_recording_async()
             try:
-                client, _ = get_ai_client()
-                with open(temp_record_path, "rb") as audio_file:
-                    transcript = await client.audio.transcriptions.create(
-                        model="whisper-1",
-                        file=audio_file,
-                        language="en"
-                    )
-                recognized_text = transcript.text.strip()
+                recognized_text = await transcribe_audio(temp_record_path)
                 if recognized_text:
                     await send_message(f"[Голосовой ответ]: {recognized_text}")
                 else:
@@ -354,6 +360,7 @@ async def main(page: ft.Page):
             finally:
                 loading_indicator.visible = False
                 page.update()
+
 
     async def clear_chat(e):
         conn = sqlite3.connect(DB_PATH)
