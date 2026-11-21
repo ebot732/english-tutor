@@ -114,12 +114,19 @@ async def ask_llm(messages: list[dict], temperature: float = 0.7) -> str:
 
 
 def _sync_download_tts(clean_text: str, out_path: str):
-    q = urllib.parse.quote(clean_text)
-    url = f"https://google.com{q}&tl=en&client=tw-ob"
+    normalized = " ".join(clean_text.split())
+    params = urllib.parse.urlencode({
+        "ie": "UTF-8",
+        "q": normalized[:200],
+        "tl": "en",
+        "client": "tw-ob"
+    })
+    url = f"https://google.com?{params}"
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
     with urllib.request.urlopen(req, timeout=20) as resp:
         with open(out_path, "wb") as f:
             f.write(resp.read())
+
 
 
 def build_system_prompt() -> str:
