@@ -11,7 +11,8 @@ import urllib.parse
 import urllib.error
 import flet as ft
 import flet_audio as fta
-from flet_sherpa_onnx import FletSherpaOnnx
+import flet_audio_recorder as far
+import speech_recognition as sr
 
 # Безопасный импорт pyjnius (для работы на ПК без Android)
 try:
@@ -211,13 +212,27 @@ def _sync_android_tts(text: str) -> None:
         TextToSpeech = autoclass('android.speech.tts.TextToSpeech')
         PythonActivity = autoclass('org.kivy.android.PythonActivity')
         Locale = autoclass('java.util.Locale')
-        
+
         context = PythonActivity.mActivity
         tts = TextToSpeech(context, None)
         tts.setLanguage(Locale.US)
         tts.speak(text, 0, None, "utterance_id")
     except Exception as e:
         raise RuntimeError(f"Ошибка Android TTS: {e}")
+
+# --- РАСПОЗНАВАНИЕ РЕЧИ (Бесплатный Google Web Speech API) ---
+def _sync_recognize_audio(file_path: str) -> str:
+    if not os.path.exists(file_path):
+        raise RuntimeError("Файл записи не найден")
+    r = sr.Recognizer()
+    try:
+        with sr.AudioFile(file_path) as source:
+            audio = r.record(source)
+        return r.recognize_google(audio, language="en-US")
+    except sr.UnknownValueError:
+        return ""
+    except sr.RequestError as e:
+        raise RuntimeError(f"Сервис распознавания недоступен: {e}")
 
 def build_system_prompt() -> str:
     level = get_setting("level")
@@ -263,47 +278,88 @@ async def main(page: ft.Page):
 
         chat_list = ft.ListView(expand=True, spacing=12, padding=15, auto_scroll=True)
 
-        # --- НОВАЯ ЛОГИКА STT (Распознавание речи с микрофона) ---
-        sherpa_stt = FletSherpaOnnx()
-        page.overlay.append(sherpa_stt)
+        # --- ЛОГИКА STT (Запись + Распознавание) ---
+        recorder = far.AudioRecorder(
+            configuration=far.AudioRecorderConfiguration(
+                encoder=far.AudioEncoder.WAV
+            )
+        )
+        page.overlay.append(recorder)
         page.update()
 
-        stt_ready = False
+        is_recording = False
+        temp_audio_path = os.path.join(STORAGE_DIR, "temp_recording.wav")
+
+        # Кнопка-переключатель микрофона (создаём заранее, чтобы менять иконку)
+        mic_button = ft.IconButton(
+            icon=ft.Icons.MIC_ROUNDED,
+            icon_color=ft.Colors.BLUE_600,
+            tooltip="Голосовой ввод (нажмите для старта, ещё раз — для остановки)",
+        )
 
         async def mic_button_click(e):
-            nonlocal stt_ready
-            try:
-                if not stt_ready:
-                    # Инициализация движка распознавания
-                    await sherpa_stt.CreateRecognizer()
-                    stt_ready = True
-                    show_snack("Слушаю... Говорите по-английски", ft.Colors.BLUE_700)
-                else:
-                    show_snack("Слушаю... Говорите по-английски", ft.Colors.BLUE_700)
-                
-                # Начинаем запись
-                await sherpa_stt.StartRecording(timeout=10)
-            except Exception as ex:
-                show_snack(f"Ошибка микрофона: {ex}", ft.Colors.RED_600)
-
-        async def stop_and_send(e):
-            try:
-                # Останавливаем запись и получаем текст
-                text = await sherpa_stt.StopRecording()
-                if text:
-                    user_input.value = text
+            nonlocal is_recording
+            if is_recording:
+                # Останавливаем запись и распознаём
+                try:
+                    await recorder.stop_recording()
+                    is_recording = False
+                    mic_button.icon = ft.Icons.MIC_ROUNDED
+                    mic_button.icon_color = ft.Colors.BLUE_600
                     page.update()
-                    await send_message()
-                else:
-                    show_snack("Не удалось распознать речь. Попробуйте снова.", ft.Colors.ORANGE_700)
-            except Exception as ex:
-                show_snack(f"Ошибка распознавания: {ex}", ft.Colors.RED_600)
+                    show_snack("Обработка записи...", ft.Colors.BLUE_700)
+
+                    text = await asyncio.to_thread(_sync_recognize_audio, temp_audio_path)
+
+                    if text:
+                        user_input.value = text
+                        page.update()
+                        await send_message()
+                    else:
+                        show_snack("Речь не распознана. Попробуйте ещё раз.", ft.Colors.ORANGE_700)
+                except Exception as ex:
+                    is_recording = False
+                    mic_button.icon = ft.Icons.MIC_ROUNDED
+                    mic_button.icon_color = ft.Colors.BLUE_600
+                    page.update()
+                    show_snack(f"Ошибка распознавания: {ex}", ft.Colors.RED_600)
+            else:
+                # Начинаем запись
+                try:
+                    # Проверка разрешения
+                    status = await recorder.get_permission_status()
+                    # В разных версиях возвращает enum или bool — сравниваем через str
+                    status_str = str(status).lower()
+                    if "denied" in status_str and "granted" not in status_str:
+                        await recorder.has_permission()
+
+                    # Удаляем старый файл, если был
+                    if os.path.exists(temp_audio_path):
+                        try:
+                            os.remove(temp_audio_path)
+                        except Exception:
+                            pass
+
+                    await recorder.start_recording(output_path=temp_audio_path)
+                    is_recording = True
+                    mic_button.icon = ft.Icons.STOP_CIRCLE_ROUNDED
+                    mic_button.icon_color = ft.Colors.RED_400
+                    page.update()
+                    show_snack("Говорите... Нажмите ещё раз, чтобы остановить.", ft.Colors.GREEN_700)
+                except Exception as ex:
+                    is_recording = False
+                    mic_button.icon = ft.Icons.MIC_ROUNDED
+                    mic_button.icon_color = ft.Colors.BLUE_600
+                    page.update()
+                    show_snack(f"Ошибка доступа к микрофону: {ex}", ft.Colors.RED_600)
+
+        mic_button.on_click = lambda e: page.run_task(mic_button_click, e)
 
         async def speak_text(english_text: str):
             clean_text = extract_english_part(english_text)
             if not clean_text:
                 return
-            
+
             tts_mode = get_setting("tts_mode").strip()
 
             # Использование бесплатного Android TTS
@@ -517,19 +573,8 @@ async def main(page: ft.Page):
                 ft.Container(
                     content=ft.Row(
                         [
-                            ft.IconButton(
-                                icon=ft.Icons.MIC_ROUNDED,
-                                icon_color=ft.Colors.BLUE_600,
-                                tooltip="Начать запись",
-                                on_click=lambda e: page.run_task(mic_button_click, e)
-                            ),
+                            mic_button,
                             user_input,
-                            ft.IconButton(
-                                icon=ft.Icons.STOP_CIRCLE_OUTLINED,
-                                icon_color=ft.Colors.RED_400,
-                                tooltip="Остановить и распознать",
-                                on_click=lambda e: page.run_task(stop_and_send, e)
-                            ),
                             ft.IconButton(
                                 icon=ft.Icons.SEND_ROUNDED,
                                 icon_color=ft.Colors.BLUE_600,

@@ -2,11 +2,12 @@
 name = "EnglishTutor"
 version = "1.4"
 description = "AI English Tutor with Voice and Dictionary"
-requires-python = ">=3.12"
+requires-python = ">=3.10" # Возвращаем 3.10, так как SpeechRecognition не требует 3.12
 dependencies = [
     "flet==0.28.3",
     "flet-audio",
-    "flet-sherpa-onnx", # Версия будет установлена отдельно
+    "flet-audio-recorder",
+    "SpeechRecognition",
     "pyjnius"
 ]
 
@@ -17,4 +18,3 @@ build_number = 5
 
 [tool.flet.android]
 permissions = ["android.permission.RECORD_AUDIO"]
-extract_packages = ["flet_sherpa_onnx"]
