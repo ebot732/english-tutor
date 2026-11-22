@@ -92,12 +92,28 @@ jobs:
             --android-signing-key-password "${{ secrets.ANDROID_KEY_PASSWORD }}" \
             --verbose
 
-      - name: Rename APK
+      - name: Locate and copy APK
         run: |
-          mv build/apk/app-release.apk build/apk/english-tutor.apk
+          echo "=== Searching for APK files ==="
+          find build -name "*.apk" -type f
+          
+          APK_SRC=$(find build -name "app-release.apk" -type f | head -n 1)
+          if [ -z "$APK_SRC" ]; then
+            APK_SRC=$(find build -name "*.apk" -type f | head -n 1)
+          fi
+          
+          if [ -z "$APK_SRC" ]; then
+            echo "❌ APK file not found!"
+            exit 1
+          fi
+          
+          echo "✅ Found APK: $APK_SRC"
+          mkdir -p build/apk
+          cp "$APK_SRC" build/apk/english-tutor.apk
+          ls -lh build/apk/
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: EnglishTutor-APK
-          path: build/apk/*.apk
+          path: build/apk/english-tutor.apk
