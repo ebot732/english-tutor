@@ -1,6 +1,6 @@
 [project]
 name = "EnglishTutor"
-version = "1.1"
+version = "1.2"
 description = "AI English Tutor with Voice and Dictionary"
 requires-python = ">=3.10"
 dependencies = [
@@ -11,4 +11,4 @@ dependencies = [
 [tool.flet]
 org = "com.aitutor"
 product = "English Tutor"
-build_number = 2
+build_number = 3

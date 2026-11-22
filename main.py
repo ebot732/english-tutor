@@ -56,7 +56,8 @@ def init_db():
         "api_key_vsegpt": "",
         "level": "A1-A2 (Начальный)",
         "topic": "Путешествия и кафе",
-        "auto_tts": "1"
+        "auto_tts": "1",
+        "tts_mode": "Бесплатный голос (без траты API)"
     }
     for k, v in defaults.items():
         cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (k, v))
@@ -139,14 +140,15 @@ def _sync_ask_llm(messages: list[dict], temperature: float) -> str:
 async def ask_llm(messages: list[dict], temperature: float = 0.7) -> str:
     return await asyncio.to_thread(_sync_ask_llm, messages, temperature)
 
-
 def _sync_get_tts_base64(clean_text: str) -> str:
     normalized = " ".join(clean_text.split())[:400]
     base_url, api_key, _ = get_ai_config()
     provider = get_setting("provider").strip()
+    tts_mode = get_setting("tts_mode").strip() or "Голос ИИ (OpenAI TTS)"
     last_err = "Нет доступного сервиса озвучки"
 
-    if provider in ("ProxyAPI", "VseGPT") and api_key:
+    # 1. Если выбран "Голос ИИ" и подключен ProxyAPI или VseGPT
+    if tts_mode == "Голос ИИ (OpenAI TTS)" and provider in ("ProxyAPI", "VseGPT") and api_key:
         try:
             url = f"{base_url}/audio/speech"
             headers = {
@@ -168,6 +170,7 @@ def _sync_get_tts_base64(clean_text: str) -> str:
         except Exception as e:
             last_err = f"TTS API: {e}"
 
+    # 2. Если выбран "Бесплатный голос" или включен OpenRouter (или ИИ-озвучка недоступна)
     free_urls = [
         f"https://streamelements.com?{urllib.parse.urlencode({'voice': 'Brian', 'text': normalized[:200]})}",
         f"https://google.com?{urllib.parse.urlencode({'ie': 'UTF-8', 'q': normalized[:200], 'tl': 'en', 'client': 'gtx'})}"
@@ -240,7 +243,7 @@ async def main(page: ft.Page):
                     if isinstance(item, fta.Audio):
                         page.overlay.remove(item)
 
-                player = fta.Audio(src_base64=b64_audio, autoplay=True, playback_rate=0.8)
+                player = fta.Audio(src_base64=b64_audio, autoplay=True, playback_rate=0.7)
                 page.overlay.append(player)
                 page.update()
                 #player.play()
@@ -533,6 +536,7 @@ async def main(page: ft.Page):
         )
 
 #########
+
         initial_provider = get_setting("provider") or "OpenRouter (Бесплатно)"
 
         api_key_tf = ft.TextField(
@@ -577,6 +581,15 @@ async def main(page: ft.Page):
             hint_text="Например: Заказ еды, Собеседование, Хобби"
         )
 
+        tts_mode_dd = ft.Dropdown(
+            label="Тип озвучки учителя",
+            value=get_setting("tts_mode") or "Голос ИИ (OpenAI TTS)",
+            options=[
+                ft.dropdown.Option("Голос ИИ (OpenAI TTS)"),
+                ft.dropdown.Option("Бесплатный голос (без траты API)"),
+            ]
+        )
+
         auto_tts_sw = ft.Switch(
             label="Автоматически озвучивать ответы учителя",
             value=(get_setting("auto_tts") == "1")
@@ -591,6 +604,7 @@ async def main(page: ft.Page):
                 set_setting(get_provider_key_name(selected_provider), api_key_tf.value or "")
                 set_setting("level", level_dd.value or "A1-A2 (Начальный)")
                 set_setting("topic", topic_tf.value or "Путешествия и кафе")
+                set_setting("tts_mode", tts_mode_dd.value or "Голос ИИ (OpenAI TTS)")
                 set_setting("auto_tts", "1" if auto_tts_sw.value else "0")
                 save_status_text.value = f"✅ Настройки и ключ для {selected_provider} сохранены!"
                 save_status_text.color = ft.Colors.GREEN_700
@@ -625,6 +639,7 @@ async def main(page: ft.Page):
                             ft.Divider(),
                             level_dd,
                             topic_tf,
+                            tts_mode_dd,
                             auto_tts_sw,
                             ft.ElevatedButton(
                                 "Сохранить настройки",
@@ -690,3 +705,5 @@ async def main(page: ft.Page):
 
 if __name__ == "__main__":
     ft.app(target=main)
+
+        
