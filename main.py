@@ -16,6 +16,15 @@ STORAGE_DIR = os.getenv("FLET_APP_STORAGE_DATA") or tempfile.gettempdir()
 DB_PATH = os.path.join(STORAGE_DIR, "tutor_data.db")
 
 
+def get_provider_key_name(provider: str) -> str:
+    p = (provider or "").strip()
+    if p == "ProxyAPI":
+        return "api_key_proxyapi"
+    elif p == "VseGPT":
+        return "api_key_vsegpt"
+    return "api_key_openrouter"
+
+
 def init_db():
     os.makedirs(STORAGE_DIR, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
@@ -42,18 +51,33 @@ def init_db():
     """)
     defaults = {
         "provider": "OpenRouter (Бесплатно)",
-        "api_key": "",
+        "api_key_openrouter": "",
+        "api_key_proxyapi": "",
+        "api_key_vsegpt": "",
         "level": "A1-A2 (Начальный)",
         "topic": "Путешествия и кафе",
         "auto_tts": "1"
     }
     for k, v in defaults.items():
         cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (k, v))
+
+    # Перенос старого общего ключа (если был сохранён ранее) в ячейку текущего провайдера
+    cursor.execute("SELECT value FROM settings WHERE key = 'api_key'")
+    old_row = cursor.fetchone()
+    if old_row and old_row[0]:
+        cursor.execute("SELECT value FROM settings WHERE key = 'provider'")
+        prov_row = cursor.fetchone()
+        target_key = get_provider_key_name(prov_row[0] if prov_row else "")
+        cursor.execute("UPDATE settings SET value = ? WHERE key = ? AND value = ''", (old_row[0], target_key))
+        cursor.execute("DELETE FROM settings WHERE key = 'api_key'")
+
     conn.commit()
     conn.close()
 
 
 def get_setting(key: str) -> str:
+    if key == "api_key":
+        key = get_provider_key_name(get_setting("provider"))
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("SELECT value FROM settings WHERE key = ?", (key,))
@@ -63,6 +87,8 @@ def get_setting(key: str) -> str:
 
 
 def set_setting(key: str, value: str):
+    if key == "api_key":
+        key = get_provider_key_name(get_setting("provider"))
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, str(value)))
@@ -72,7 +98,7 @@ def set_setting(key: str, value: str):
 
 def get_ai_config() -> tuple[str, str, str]:
     provider = get_setting("provider").strip()
-    api_key = get_setting("api_key").strip()
+    api_key = get_setting(get_provider_key_name(provider)).strip()
 
     if provider == "ProxyAPI":
         return "https://api.proxyapi.ru/v1", api_key, "openai/gpt-4o-mini"
@@ -80,7 +106,6 @@ def get_ai_config() -> tuple[str, str, str]:
         return "https://api.vsegpt.ru/v1", api_key, "openai/gpt-4o-mini"
     else:
         return "https://openrouter.ai/api/v1", api_key, "openrouter/free"
-
 
 def _sync_ask_llm(messages: list[dict], temperature: float) -> str:
     base_url, api_key, model = get_ai_config()
@@ -119,8 +144,8 @@ def _sync_get_tts_base64(clean_text: str) -> str:
     normalized = " ".join(clean_text.split())[:400]
     base_url, api_key, _ = get_ai_config()
     provider = get_setting("provider").strip()
+    last_err = "Нет доступного сервиса озвучки"
 
-    # 1. Если выбран ProxyAPI или VseGPT — используем качественную живую озвучку OpenAI TTS
     if provider in ("ProxyAPI", "VseGPT") and api_key:
         try:
             url = f"{base_url}/audio/speech"
@@ -142,10 +167,7 @@ def _sync_get_tts_base64(clean_text: str) -> str:
                     return base64.b64encode(audio_bytes).decode("utf-8")
         except Exception as e:
             last_err = f"TTS API: {e}"
-    else:
-        last_err = "Нет платного провайдера"
 
-    # 2. Резервный бесплатный синтезатор (StreamElements / Google)
     free_urls = [
         f"https://streamelements.com?{urllib.parse.urlencode({'voice': 'Brian', 'text': normalized[:200]})}",
         f"https://google.com?{urllib.parse.urlencode({'ie': 'UTF-8', 'q': normalized[:200], 'tl': 'en', 'client': 'gtx'})}"
@@ -161,7 +183,6 @@ def _sync_get_tts_base64(clean_text: str) -> str:
             last_err = str(e)
 
     raise RuntimeError(last_err)
-
 
 
 def build_system_prompt() -> str:
@@ -185,6 +206,7 @@ def extract_english_part(text: str) -> str:
     cleaned = re.sub(r'\(.*?\)', '', text, flags=re.DOTALL)
     cleaned = cleaned.replace("**", "").strip()
     return cleaned
+
 
 #############
 
@@ -218,7 +240,7 @@ async def main(page: ft.Page):
                     if isinstance(item, fta.Audio):
                         page.overlay.remove(item)
 
-                player = fta.Audio(src_base64=b64_audio, autoplay=True)
+                player = fta.Audio(src_base64=b64_audio, autoplay=True, playback_rate=0.8)
                 page.overlay.append(player)
                 page.update()
                 #player.play()
@@ -511,23 +533,32 @@ async def main(page: ft.Page):
         )
 
 #########
+        initial_provider = get_setting("provider") or "OpenRouter (Бесплатно)"
+
+        api_key_tf = ft.TextField(
+            label=f"API-ключ для {initial_provider}",
+            value=get_setting(get_provider_key_name(initial_provider)),
+            password=True,
+            can_reveal_password=True,
+            hint_text="Вставьте ключ для выбранного провайдера"
+        )
+
+        def on_provider_change(e):
+            selected = provider_dd.value or "OpenRouter (Бесплатно)"
+            api_key_tf.label = f"API-ключ для {selected}"
+            api_key_tf.value = get_setting(get_provider_key_name(selected))
+            save_status_text.value = ""
+            page.update()
 
         provider_dd = ft.Dropdown(
             label="Провайдер ИИ",
-            value=get_setting("provider") or "OpenRouter (Бесплатно)",
+            value=initial_provider,
+            on_change=on_provider_change,
             options=[
                 ft.dropdown.Option("OpenRouter (Бесплатно)"),
                 ft.dropdown.Option("ProxyAPI"),
                 ft.dropdown.Option("VseGPT"),
             ]
-        )
-
-        api_key_tf = ft.TextField(
-            label="API-ключ",
-            value=get_setting("api_key"),
-            password=True,
-            can_reveal_password=True,
-            hint_text="Вставьте ключ от OpenRouter, ProxyAPI или VseGPT"
         )
 
         level_dd = ft.Dropdown(
@@ -555,12 +586,13 @@ async def main(page: ft.Page):
 
         def save_settings_click(e):
             try:
-                set_setting("provider", provider_dd.value or "OpenRouter (Бесплатно)")
-                set_setting("api_key", api_key_tf.value or "")
+                selected_provider = provider_dd.value or "OpenRouter (Бесплатно)"
+                set_setting("provider", selected_provider)
+                set_setting(get_provider_key_name(selected_provider), api_key_tf.value or "")
                 set_setting("level", level_dd.value or "A1-A2 (Начальный)")
                 set_setting("topic", topic_tf.value or "Путешествия и кафе")
                 set_setting("auto_tts", "1" if auto_tts_sw.value else "0")
-                save_status_text.value = "✅ Настройки сохранены в память телефона!"
+                save_status_text.value = f"✅ Настройки и ключ для {selected_provider} сохранены!"
                 save_status_text.color = ft.Colors.GREEN_700
                 page.update()
                 show_snack("Настройки успешно сохранены!", ft.Colors.GREEN_700)
@@ -584,6 +616,7 @@ async def main(page: ft.Page):
                             provider_dd,
                             api_key_tf,
                             ft.Text(
+                                "Ключи сохраняются отдельно для каждого провайдера. "
                                 "Бесплатный ключ (без карты) берется на openrouter.ai/settings/keys (работает с VPN). "
                                 "Для РФ без VPN подходят ProxyAPI и VseGPT.",
                                 size=12,
