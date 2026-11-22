@@ -6,7 +6,7 @@ requires-python = ">=3.12"
 dependencies = [
     "flet==0.28.3",
     "flet-audio",
-    "flet-sherpa-onnx==0.2.2",
+    "flet-sherpa-onnx==0.2.1",
     "pyjnius"
 ]
 
