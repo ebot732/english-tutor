@@ -20,9 +20,9 @@ build_number = 5
 [tool.flet.flutter.dependencies]
 flet_audio_recorder = "0.1.0"
 
-# 🔧 ГЛАВНОЕ ИСПРАВЛЕНИЕ: Принудительно откатываем record_linux до рабочей версии
+# 🔧 ГЛАВНОЕ ИСПРАВЛЕНИЕ: Принудительно обновляем record_linux до совместимой версии
 [tool.flet.flutter.pubspec.dependency_overrides]
-record_linux = "0.7.1"
+record_linux = "1.1.0"
 
 # Указываем minSdkVersion 23 (требование record_android)
 [tool.flet.android]
