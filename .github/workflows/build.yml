@@ -40,6 +40,10 @@ jobs:
           pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Install flet-sherpa-onnx (without dependencies)
+        run: |
+          pip install flet-sherpa-onnx==0.2.1 --no-deps
+
       - name: Decode Keystore
         run: |
           echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > android-release.jks
