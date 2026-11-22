@@ -14,10 +14,12 @@ dependencies = [
 [tool.flet]
 org = "com.aitutor"
 product = "English Tutor"
-build_number = 7
+build_number = 8
 
 [tool.flet.android]
 min_sdk_version = 24
+# Пакет SpeechRecognition не умеет читать данные из ZIP, поэтому распаковываем его на диск
+extract_packages = ["speech_recognition"]
 
 [tool.flet.android.permission]
 "android.permission.RECORD_AUDIO" = true
