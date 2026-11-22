@@ -326,12 +326,11 @@ async def main(page: ft.Page):
             else:
                 # Начинаем запись
                 try:
-                    # Проверка разрешения
-                    status = await recorder.get_permission_status()
-                    # В разных версиях возвращает enum или bool — сравниваем через str
-                    status_str = str(status).lower()
-                    if "denied" in status_str and "granted" not in status_str:
-                        await recorder.has_permission()
+                    # Запрашиваем разрешение (в flet-audio-recorder этот метод и запрашивает, и возвращает статус)
+                    has_perm = await recorder.has_permission()
+                    if not has_perm:
+                        show_snack("Разрешение на микрофон не выдано", ft.Colors.RED_600)
+                        return
 
                     # Удаляем старый файл, если был
                     if os.path.exists(temp_audio_path):
