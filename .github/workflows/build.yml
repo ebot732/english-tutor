@@ -5,10 +5,13 @@ on:
     branches: [ main ]
   workflow_dispatch:
 
+env:
+  GRADLE_USER_HOME: ${{ github.workspace }}/.gradle
+
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 30
 
     steps:
       - name: Checkout repository
@@ -32,8 +35,49 @@ jobs:
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.27.4'
+          flutter-version: '3.47.9'
           channel: 'stable'
+
+      - name: Create Gradle init script to use Google Maven Central mirror
+        run: |
+          mkdir -p $GRADLE_USER_HOME/init.d
+          cat > $GRADLE_USER_HOME/init.d/google-maven-mirror.gradle <<'EOF'
+          // Заменяем Maven Central на зеркало Google, чтобы избежать 429 ошибок
+          def mirror = "https://maven-central.storage-download.googleapis.com/maven2/"
+          def centralHosts = ["repo.maven.apache.org", "repo1.maven.org"]
+
+          settingsEvaluated { settings ->
+              settings.pluginManagement.repositories {
+                  maven { url = mirror; name = "GoogleMavenMirror" }
+                  gradlePluginPortal()
+              }
+              settings.dependencyResolutionManagement.repositories {
+                  maven { url = mirror; name = "GoogleMavenMirror" }
+                  google()
+              }
+          }
+
+          allprojects {
+              buildscript.repositories {
+                  maven { url = mirror; name = "GoogleMavenMirror" }
+                  google()
+              }
+              repositories {
+                  maven { url = mirror; name = "GoogleMavenMirror" }
+                  google()
+              }
+          }
+          EOF
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.GRADLE_USER_HOME }}/caches
+            ${{ env.GRADLE_USER_HOME }}/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
 
       - name: Install dependencies
         run: |
@@ -57,7 +101,7 @@ jobs:
       - name: Rename APK
         run: |
           mv build/apk/app-release.apk build/apk/english-tutor.apk
-          
+
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
