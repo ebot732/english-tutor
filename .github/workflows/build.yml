@@ -40,9 +40,19 @@ jobs:
           pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Decode Keystore
+        run: |
+          echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > android-release.jks
+
       - name: Build APK
         run: |
-          flet build apk --permissions microphone --verbose
+          flet build apk \
+            --permissions microphone \
+            --android-signing-key-store android-release.jks \
+            --android-signing-key-store-password "${{ secrets.ANDROID_KEYSTORE_PASSWORD }}" \
+            --android-signing-key-alias "${{ secrets.ANDROID_KEY_ALIAS }}" \
+            --android-signing-key-password "${{ secrets.ANDROID_KEY_PASSWORD }}" \
+            --verbose
 
       - name: Rename APK
         run: |
