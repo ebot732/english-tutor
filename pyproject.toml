@@ -1,14 +1,15 @@
 [project]
 name = "EnglishTutor"
-version = "1.2"
+version = "1.3.0"
 description = "AI English Tutor with Voice and Dictionary"
 requires-python = ">=3.10"
 dependencies = [
     "flet==0.28.3",
-    "flet-audio"
+    "flet-audio",
+    "flet-audio-recorder"
 ]
 
 [tool.flet]
 org = "com.aitutor"
 product = "English Tutor"
-build_number = 3
+build_number = 4
