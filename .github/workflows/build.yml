@@ -46,9 +46,8 @@ jobs:
 
       - name: Build APK
         run: |
+          # Флаг --include-packages убран. Плагин подключится из pyproject.toml
           flet build apk \
-            --permissions microphone \
-            --include-packages flet_audio_recorder \
             --android-signing-key-store android-release.jks \
             --android-signing-key-store-password "${{ secrets.ANDROID_KEYSTORE_PASSWORD }}" \
             --android-signing-key-alias "${{ secrets.ANDROID_KEY_ALIAS }}" \
