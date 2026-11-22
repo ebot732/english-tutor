@@ -2,11 +2,11 @@
 name = "EnglishTutor"
 version = "1.4"
 description = "AI English Tutor with Voice and Dictionary"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 dependencies = [
     "flet==0.28.3",
     "flet-audio",
-    "flet-stt",
+    "flet-sherpa-onnx==0.2.2",
     "pyjnius"
 ]
 
@@ -17,9 +17,4 @@ build_number = 5
 
 [tool.flet.android]
 permissions = ["android.permission.RECORD_AUDIO"]
-
-[tool.flet.app]
-exclude = ["flet_stt"]
-
-[tool.flet.dev_packages]
-flet-stt = "flet_stt"
+extract_packages = ["flet_sherpa_onnx"]

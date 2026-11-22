@@ -11,7 +11,7 @@ import urllib.parse
 import urllib.error
 import flet as ft
 import flet_audio as fta
-from flet_stt import FletStt
+from flet_sherpa_onnx import FletSherpaOnnx
 
 # Безопасный импорт pyjnius (для работы на ПК без Android)
 try:
@@ -76,7 +76,7 @@ def init_db():
         "level": "A1-A2 (Начальный)",
         "topic": "Путешествия и кафе",
         "auto_tts": "1",
-        "tts_mode": "Бесплатный голос (Android TTS)"
+        "tts_mode": "Голос ИИ (OpenAI TTS)"
     }
     for k, v in defaults.items():
         cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (k, v))
@@ -203,7 +203,7 @@ def _sync_get_tts_base64(clean_text: str) -> str:
 
     raise RuntimeError(last_err)
 
-# --- НОВАЯ ФУНКЦИЯ: Нативный Android TTS (Бесплатный) ---
+# --- НАТИВНЫЙ ANDROID TTS (Бесплатный) ---
 def _sync_android_tts(text: str) -> None:
     if autoclass is None:
         raise RuntimeError("pyjnius не установлен. Используйте Голос ИИ.")
@@ -215,7 +215,6 @@ def _sync_android_tts(text: str) -> None:
         context = PythonActivity.mActivity
         tts = TextToSpeech(context, None)
         tts.setLanguage(Locale.US)
-        # QUEUE_FLUSH=0 (перебивает текущую озвучку)
         tts.speak(text, 0, None, "utterance_id")
     except Exception as e:
         raise RuntimeError(f"Ошибка Android TTS: {e}")
@@ -265,26 +264,40 @@ async def main(page: ft.Page):
         chat_list = ft.ListView(expand=True, spacing=12, padding=15, auto_scroll=True)
 
         # --- НОВАЯ ЛОГИКА STT (Распознавание речи с микрофона) ---
-        stt = FletStt()
+        sherpa_stt = FletSherpaOnnx()
+        page.overlay.append(sherpa_stt)
+        page.update()
 
-        async def on_stt_result(e):
-            data = json.loads(e.data)
-            if data.get("final"):
-                user_input.value = data["text"]
-                page.update()
-                await send_message()
-
-        stt.on_result = on_stt_result
+        stt_ready = False
 
         async def mic_button_click(e):
+            nonlocal stt_ready
             try:
-                success = await stt.initialize()
-                if success:
-                    await stt.listen(locale_id="en_US") # Слушаем на английском
+                if not stt_ready:
+                    # Инициализация движка распознавания
+                    await sherpa_stt.CreateRecognizer()
+                    stt_ready = True
+                    show_snack("Слушаю... Говорите по-английски", ft.Colors.BLUE_700)
                 else:
-                    show_snack("Не удалось получить доступ к микрофону", ft.Colors.RED_600)
+                    show_snack("Слушаю... Говорите по-английски", ft.Colors.BLUE_700)
+                
+                # Начинаем запись
+                await sherpa_stt.StartRecording(timeout=10)
             except Exception as ex:
                 show_snack(f"Ошибка микрофона: {ex}", ft.Colors.RED_600)
+
+        async def stop_and_send(e):
+            try:
+                # Останавливаем запись и получаем текст
+                text = await sherpa_stt.StopRecording()
+                if text:
+                    user_input.value = text
+                    page.update()
+                    await send_message()
+                else:
+                    show_snack("Не удалось распознать речь. Попробуйте снова.", ft.Colors.ORANGE_700)
+            except Exception as ex:
+                show_snack(f"Ошибка распознавания: {ex}", ft.Colors.RED_600)
 
         async def speak_text(english_text: str):
             clean_text = extract_english_part(english_text)
@@ -300,16 +313,14 @@ async def main(page: ft.Page):
                 except Exception as e:
                     chat_list.controls.append(build_message_bubble("error", f"🔊 {e}"))
                     page.update()
-                return # Прерываем, чтобы не делать запрос к платному API
+                return
 
             # Стандартная логика (API)
             try:
                 b64_audio = await asyncio.to_thread(_sync_get_tts_base64, clean_text)
-
                 for item in list(page.overlay):
                     if isinstance(item, fta.Audio):
                         page.overlay.remove(item)
-
                 player = fta.Audio(src_base64=b64_audio, autoplay=True, playback_rate=0.7)
                 page.overlay.append(player)
                 page.update()
@@ -509,10 +520,16 @@ async def main(page: ft.Page):
                             ft.IconButton(
                                 icon=ft.Icons.MIC_ROUNDED,
                                 icon_color=ft.Colors.BLUE_600,
-                                tooltip="Голосовой ввод",
+                                tooltip="Начать запись",
                                 on_click=lambda e: page.run_task(mic_button_click, e)
                             ),
                             user_input,
+                            ft.IconButton(
+                                icon=ft.Icons.STOP_CIRCLE_OUTLINED,
+                                icon_color=ft.Colors.RED_400,
+                                tooltip="Остановить и распознать",
+                                on_click=lambda e: page.run_task(stop_and_send, e)
+                            ),
                             ft.IconButton(
                                 icon=ft.Icons.SEND_ROUNDED,
                                 icon_color=ft.Colors.BLUE_600,
@@ -639,7 +656,6 @@ async def main(page: ft.Page):
             hint_text="Например: Заказ еды, Собеседование, Хобби"
         )
 
-        # ОБНОВЛЕННЫЙ СПИСОК ОЗВУЧКИ
         tts_mode_dd = ft.Dropdown(
             label="Тип озвучки учителя",
             value=get_setting("tts_mode") or "Голос ИИ (OpenAI TTS)",
