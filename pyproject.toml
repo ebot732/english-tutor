@@ -1,12 +1,11 @@
 [project]
 name = "EnglishTutor"
-version = "1.4"
+version = "1.5"
 description = "AI English Tutor with Voice and Dictionary"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 dependencies = [
-    "flet==0.28.3",
-    "flet-audio",
-    "flet-audio-recorder==0.1.0",
+    "flet>=1.1.2",
+    "flet-audio-recorder>=1.0.0",
     "SpeechRecognition",
     "pyjnius"
 ]
@@ -14,21 +13,11 @@ dependencies = [
 [tool.flet]
 org = "com.aitutor"
 product = "English Tutor"
-build_number = 5
+build_number = 6
 
-# Подключаем Flutter-плагин записи звука
-[tool.flet.flutter.dependencies]
-flet_audio_recorder = "0.1.0"
-
-# 🔧 ГЛАВНОЕ ИСПРАВЛЕНИЕ: Принудительно обновляем record_linux до совместимой версии
-[tool.flet.flutter.pubspec.dependency_overrides]
-record_linux = "1.1.0"
-
-# Указываем minSdkVersion 23 (требование record_android)
 [tool.flet.android]
 min_sdk_version = 23
 
-# Явно задаём разрешения для микрофона
 [tool.flet.android.permission]
 "android.permission.RECORD_AUDIO" = true
 "android.permission.MODIFY_AUDIO_SETTINGS" = true

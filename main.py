@@ -32,7 +32,7 @@ def get_app_version() -> str:
         build = data.get("tool", {}).get("flet", {}).get("build_number", 1)
         return f"{ver} (сборка {build})"
     except Exception:
-        return "1.4.0"
+        return "1.5.0"
 
 
 def get_provider_key_name(provider: str) -> str:
@@ -817,4 +817,4 @@ async def main(page: ft.Page):
 
 
 if __name__ == "__main__":
-    ft.app(target=main)
+    ft.run(main)

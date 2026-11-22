@@ -1,5 +1,4 @@
-flet==0.28.3
-flet-audio
-flet-audio-recorder==0.1.0
+flet>=1.1.2
+flet-audio-recorder>=1.0.0
 SpeechRecognition
 pyjnius
