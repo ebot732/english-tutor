@@ -1,2 +1,2 @@
-# english-tutor2
+# english-tutor
 Помощник по изучению английского
