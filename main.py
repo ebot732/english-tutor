@@ -1,6 +1,5 @@
 import os
 import re
-import ssl
 import json
 import base64
 import sqlite3
@@ -12,14 +11,21 @@ import urllib.parse
 import urllib.error
 import flet as ft
 import flet_audio as fta
-import flet_audio_recorder as ftar
 
 STORAGE_DIR = os.getenv("FLET_APP_STORAGE_DATA") or tempfile.gettempdir()
 DB_PATH = os.path.join(STORAGE_DIR, "tutor_data.db")
 
-SSL_CTX = ssl.create_default_context()
-SSL_CTX.check_hostname = False
-SSL_CTX.verify_mode = ssl.CERT_NONE
+import tomllib
+def get_app_version() -> str:
+    try:
+        toml_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pyproject.toml")
+        with open(toml_path, "rb") as f:
+            data = tomllib.load(f)
+        ver = data.get("project", {}).get("version", "1.0.0")
+        build = data.get("tool", {}).get("flet", {}).get("build_number", 1)
+        return f"{ver} (сборка {build})"
+    except Exception:
+        return "1.2.0"
 
 
 def get_provider_key_name(provider: str) -> str:
@@ -63,11 +69,21 @@ def init_db():
         "level": "A1-A2 (Начальный)",
         "topic": "Путешествия и кафе",
         "auto_tts": "1",
-        "tts_mode": "Бесплатный голос (без траты API)",
-        "stt_mode": "Через клавиатуру телефона (Бесплатно)"
+        "tts_mode": "Бесплатный голос (без траты API)"
     }
     for k, v in defaults.items():
         cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (k, v))
+
+    # Перенос старого общего ключа (если был сохранён ранее) в ячейку текущего провайдера
+    cursor.execute("SELECT value FROM settings WHERE key = 'api_key'")
+    old_row = cursor.fetchone()
+    if old_row and old_row[0]:
+        cursor.execute("SELECT value FROM settings WHERE key = 'provider'")
+        prov_row = cursor.fetchone()
+        target_key = get_provider_key_name(prov_row[0] if prov_row else "")
+        cursor.execute("UPDATE settings SET value = ? WHERE key = ? AND value = ''", (old_row[0], target_key))
+        cursor.execute("DELETE FROM settings WHERE key = 'api_key'")
+
     conn.commit()
     conn.close()
 
@@ -80,7 +96,7 @@ def get_setting(key: str) -> str:
     cursor.execute("SELECT value FROM settings WHERE key = ?", (key,))
     row = cursor.fetchone()
     conn.close()
-    return str(row) if row and row is not None else ""
+    return str(row[0]) if row and row[0] is not None else ""
 
 
 def set_setting(key: str, value: str):
@@ -104,7 +120,6 @@ def get_ai_config() -> tuple[str, str, str]:
     else:
         return "https://openrouter.ai/api/v1", api_key, "openrouter/free"
 
-
 def _sync_ask_llm(messages: list[dict], temperature: float) -> str:
     base_url, api_key, model = get_ai_config()
     url = f"{base_url}/chat/completions"
@@ -123,12 +138,12 @@ def _sync_ask_llm(messages: list[dict], temperature: float) -> str:
 
     req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
     try:
-        with urllib.request.urlopen(req, timeout=45, context=SSL_CTX) as resp:
+        with urllib.request.urlopen(req, timeout=45) as resp:
             raw = resp.read().decode("utf-8")
             data = json.loads(raw)
             if "error" in data:
                 raise RuntimeError(str(data["error"]))
-            return data["choices"]["message"]["content"].strip()
+            return data["choices"][0]["message"]["content"].strip()
     except urllib.error.HTTPError as e:
         err_body = e.read().decode("utf-8", errors="ignore")
         raise RuntimeError(f"Ошибка сервера {e.code} ({base_url}): {err_body[:200]}")
@@ -137,51 +152,14 @@ def _sync_ask_llm(messages: list[dict], temperature: float) -> str:
 async def ask_llm(messages: list[dict], temperature: float = 0.7) -> str:
     return await asyncio.to_thread(_sync_ask_llm, messages, temperature)
 
-
-def _sync_transcribe_audio(file_path: str) -> str:
-    base_url, api_key, _ = get_ai_config()
-    url = f"{base_url}/audio/transcriptions"
-    boundary = "----WebKitFormBoundary7MA4YWxkTrZu0gW"
-
-    with open(file_path, "rb") as f:
-        file_data = f.read()
-
-    body = (
-        f"--{boundary}\r\n"
-        f'Content-Disposition: form-data; name="model"\r\n\r\nwhisper-1\r\n'
-        f"--{boundary}\r\n"
-        f'Content-Disposition: form-data; name="language"\r\n\r\nen\r\n'
-        f"--{boundary}\r\n"
-        f'Content-Disposition: form-data; name="file"; filename="voice.m4a"\r\n'
-        f"Content-Type: audio/m4a\r\n\r\n"
-    ).encode("utf-8") + file_data + f"\r\n--{boundary}--\r\n".encode("utf-8")
-
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": f"multipart/form-data; boundary={boundary}",
-        "User-Agent": "EnglishTutorApp/1.0"
-    }
-    req = urllib.request.Request(url, data=body, headers=headers, method="POST")
-    try:
-        with urllib.request.urlopen(req, timeout=45, context=SSL_CTX) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            return data.get("text", "").strip()
-    except urllib.error.HTTPError as e:
-        err_body = e.read().decode("utf-8", errors="ignore")
-        raise RuntimeError(f"Ошибка Whisper {e.code}: {err_body[:200]}")
-
-
-async def transcribe_audio(file_path: str) -> str:
-    return await asyncio.to_thread(_sync_transcribe_audio, file_path)
-
-
 def _sync_get_tts_base64(clean_text: str) -> str:
     normalized = " ".join(clean_text.split())[:400]
     base_url, api_key, _ = get_ai_config()
     provider = get_setting("provider").strip()
     tts_mode = get_setting("tts_mode").strip() or "Голос ИИ (OpenAI TTS)"
-    last_err = "Неизвестная ошибка сети"
+    last_err = "Нет доступного сервиса озвучки"
 
+    # 1. Если выбран "Голос ИИ" и подключен ProxyAPI или VseGPT
     if tts_mode == "Голос ИИ (OpenAI TTS)" and provider in ("ProxyAPI", "VseGPT") and api_key:
         try:
             url = f"{base_url}/audio/speech"
@@ -197,27 +175,24 @@ def _sync_get_tts_base64(clean_text: str) -> str:
                 "response_format": "mp3"
             }).encode("utf-8")
             req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
-            with urllib.request.urlopen(req, timeout=20, context=SSL_CTX) as resp:
+            with urllib.request.urlopen(req, timeout=20) as resp:
                 audio_bytes = resp.read()
                 if len(audio_bytes) > 500:
                     return base64.b64encode(audio_bytes).decode("utf-8")
         except Exception as e:
             last_err = f"TTS API: {e}"
 
+    # 2. Если выбран "Бесплатный голос" или включен OpenRouter (или ИИ-озвучка недоступна)
     free_urls = [
         f"https://streamelements.com?{urllib.parse.urlencode({'voice': 'Brian', 'text': normalized[:200]})}",
-        f"https://youdao.com?{urllib.parse.urlencode({'audio': normalized[:200], 'type': '2'})}",
         f"https://google.com?{urllib.parse.urlencode({'ie': 'UTF-8', 'q': normalized[:200], 'tl': 'en', 'client': 'gtx'})}"
     ]
     for url in free_urls:
         try:
-            req = urllib.request.Request(
-                url,
-                headers={"User-Agent": "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/120.0.0.0 Mobile Safari/537.36"}
-            )
-            with urllib.request.urlopen(req, timeout=12, context=SSL_CTX) as resp:
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+            with urllib.request.urlopen(req, timeout=12) as resp:
                 audio_bytes = resp.read()
-                if len(audio_bytes) > 300 and not audio_bytes.lstrip().startswith(b"<"):
+                if len(audio_bytes) > 500 and not audio_bytes.lstrip().startswith(b"<"):
                     return base64.b64encode(audio_bytes).decode("utf-8")
         except Exception as e:
             last_err = str(e)
@@ -236,7 +211,7 @@ def build_system_prompt() -> str:
         "2. После своей реплики на английском, с новой строки в скобках дай её перевод на русский.\n"
         "   ВАЖНО: Если в своей реплике ты используешь новое для ученика слово (не из базовой лексики), "
         "выдели его двойными звёздочками, например: **delicious**.\n"
-        "3. Если ученик допустил ошибку в грамматике, выборе слов или произношении (судя по транскрибации), "
+        "3. Если ученик допустил ошибку в грамматике, выборе слов или правописании, "
         "сначала мягко поправь его на русском языке, объясни как правильно, а затем продолжи диалог.\n"
         "4. Всегда заканчивай свой ответ простым вопросом, чтобы ученик мог продолжить разговор."
     )
@@ -246,7 +221,9 @@ def extract_english_part(text: str) -> str:
     cleaned = re.sub(r'\(.*?\)', '', text, flags=re.DOTALL)
     cleaned = cleaned.replace("**", "").strip()
     return cleaned
-#############3
+
+
+#############
 
 async def main(page: ft.Page):
     try:
@@ -256,11 +233,6 @@ async def main(page: ft.Page):
         page.theme_mode = ft.ThemeMode.LIGHT
         page.padding = 0
         page.bgcolor = "#F4F6F9"
-
-        is_recording = False
-        temp_record_path = os.path.join(tempfile.gettempdir(), "user_voice.m4a")
-        audio_recorder = ftar.AudioRecorder(audio_encoder=ftar.AudioEncoder.AAC)
-        page.overlay.append(audio_recorder)
 
         def show_snack(msg: str, color: str = ft.Colors.BLUE_700):
             try:
@@ -283,13 +255,10 @@ async def main(page: ft.Page):
                     if isinstance(item, fta.Audio):
                         page.overlay.remove(item)
 
-                player = fta.Audio(
-                    src_base64=b64_audio,
-                    autoplay=True,
-                    playback_rate=0.7
-                )
+                player = fta.Audio(src_base64=b64_audio, autoplay=True, playback_rate=0.7)
                 page.overlay.append(player)
                 page.update()
+                #player.play()
             except Exception as e:
                 chat_list.controls.append(
                     build_message_bubble("error", f"🔊 Ошибка озвучки: {e}")
@@ -297,7 +266,7 @@ async def main(page: ft.Page):
                 page.update()
 
         user_input = ft.TextField(
-            hint_text="Напишите или надиктуйте ответ...",
+            hint_text="Напишите или надиктуйте на EN...",
             expand=True,
             border_radius=20,
             bgcolor=ft.Colors.WHITE,
@@ -391,7 +360,8 @@ async def main(page: ft.Page):
                 ],
                 alignment=ft.MainAxisAlignment.END if is_user else ft.MainAxisAlignment.START
             )
-###########
+
+#####
 
         def load_chat_history():
             chat_list.controls.clear()
@@ -403,8 +373,8 @@ async def main(page: ft.Page):
             for r, c in rows:
                 chat_list.controls.append(build_message_bubble(r, c))
 
-        async def send_message(custom_text: str | None = None):
-            text = (custom_text if custom_text is not None else (user_input.value or "")).strip()
+        async def send_message():
+            text = (user_input.value or "").strip()
             if not text:
                 return
 
@@ -416,8 +386,7 @@ async def main(page: ft.Page):
                 page.update()
                 return
 
-            if custom_text is None:
-                user_input.value = ""
+            user_input.value = ""
             loading_indicator.visible = True
             chat_list.controls.append(build_message_bubble("user", text))
             page.update()
@@ -463,63 +432,9 @@ async def main(page: ft.Page):
             page.update()
             show_snack("История диалога очищена")
 
-        mic_button = ft.IconButton(
-            icon=ft.Icons.MIC_ROUNDED,
-            icon_color=ft.Colors.BLUE_600,
-            tooltip="Голосовой ввод"
-        )
-
         async def mic_button_click(e):
-            nonlocal is_recording
-            stt_mode = get_setting("stt_mode").strip() or "Через ИИ (Whisper API)"
-            provider = get_setting("provider").strip()
-
-            if stt_mode != "Через ИИ (Whisper API)":
-                await user_input.focus()
-                show_snack("Нажмите значок микрофона на открывшейся клавиатуре телефона!", ft.Colors.BLUE_700)
-                return
-
-            if provider == "OpenRouter (Бесплатно)":
-                show_snack("Whisper API работает с ProxyAPI или VseGPT. Переключите провайдер или выберите ввод с клавиатуры в Настройках.", ft.Colors.ORANGE_700)
-                return
-
-            if not get_setting("api_key").strip():
-                show_snack("Сначала укажите API-ключ в Настройках!", ft.Colors.RED_600)
-                return
-
-            if not is_recording:
-                has_perm = await audio_recorder.has_permission_async()
-                if not has_perm:
-                    show_snack("Нет разрешения на микрофон в настройках телефона!", ft.Colors.RED_600)
-                    return
-                is_recording = True
-                mic_button.icon = ft.Icons.STOP_CIRCLE
-                mic_button.icon_color = ft.Colors.RED_600
-                show_snack("🎙️ Говорите по-английски... Нажмите красную кнопку ещё раз для отправки.", ft.Colors.RED_700)
-                page.update()
-                await audio_recorder.start_recording_async(output_path=temp_record_path)
-            else:
-                is_recording = False
-                mic_button.icon = ft.Icons.MIC_ROUNDED
-                mic_button.icon_color = ft.Colors.BLUE_600
-                loading_indicator.visible = True
-                page.update()
-
-                await audio_recorder.stop_recording_async()
-                try:
-                    recognized_text = await transcribe_audio(temp_record_path)
-                    if recognized_text:
-                        await send_message(custom_text=f"🎙️ {recognized_text}")
-                    else:
-                        loading_indicator.visible = False
-                        show_snack("Речь не распознана, попробуйте сказать громче.", ft.Colors.ORANGE_700)
-                        page.update()
-                except Exception as ex:
-                    loading_indicator.visible = False
-                    chat_list.controls.append(build_message_bubble("error", f"Ошибка распознавания: {ex}"))
-                    page.update()
-
-        mic_button.on_click = lambda e: page.run_task(mic_button_click, e)
+            await user_input.focus()
+            show_snack("Нажмите значок микрофона на открывшейся клавиатуре телефона (язык EN)!", ft.Colors.BLUE_700)
 
         chat_view = ft.Column(
             [
@@ -543,7 +458,12 @@ async def main(page: ft.Page):
                 ft.Container(
                     content=ft.Row(
                         [
-                            mic_button,
+                            ft.IconButton(
+                                icon=ft.Icons.MIC_ROUNDED,
+                                icon_color=ft.Colors.BLUE_600,
+                                tooltip="Голосовой ввод с клавиатуры",
+                                on_click=lambda e: page.run_task(mic_button_click, e)
+                            ),
                             user_input,
                             ft.IconButton(
                                 icon=ft.Icons.SEND_ROUNDED,
@@ -626,6 +546,7 @@ async def main(page: ft.Page):
             spacing=0,
             visible=False
         )
+
 #########
 
         initial_provider = get_setting("provider") or "OpenRouter (Бесплатно)"
@@ -681,15 +602,6 @@ async def main(page: ft.Page):
             ]
         )
 
-        stt_mode_dd = ft.Dropdown(
-            label="Голосовой ввод (микрофон)",
-            value=get_setting("stt_mode") or "Через ИИ (Whisper API)",
-            options=[
-                ft.dropdown.Option("Через ИИ (Whisper API)"),
-                ft.dropdown.Option("Через клавиатуру телефона (Бесплатно)"),
-            ]
-        )
-
         auto_tts_sw = ft.Switch(
             label="Автоматически озвучивать ответы учителя",
             value=(get_setting("auto_tts") == "1")
@@ -705,7 +617,6 @@ async def main(page: ft.Page):
                 set_setting("level", level_dd.value or "A1-A2 (Начальный)")
                 set_setting("topic", topic_tf.value or "Путешествия и кафе")
                 set_setting("tts_mode", tts_mode_dd.value or "Голос ИИ (OpenAI TTS)")
-                set_setting("stt_mode", stt_mode_dd.value or "Через ИИ (Whisper API)")
                 set_setting("auto_tts", "1" if auto_tts_sw.value else "0")
                 save_status_text.value = f"✅ Настройки и ключ для {selected_provider} сохранены!"
                 save_status_text.color = ft.Colors.GREEN_700
@@ -732,7 +643,8 @@ async def main(page: ft.Page):
                             api_key_tf,
                             ft.Text(
                                 "Ключи сохраняются отдельно для каждого провайдера. "
-                                "Для Whisper API и голоса OpenAI TTS нужны ProxyAPI или VseGPT.",
+                                "Бесплатный ключ (без карты) берется на openrouter.ai/settings/keys (работает с VPN). "
+                                "Для РФ без VPN подходят ProxyAPI и VseGPT.",
                                 size=12,
                                 color=ft.Colors.GREY_700
                             ),
@@ -740,7 +652,6 @@ async def main(page: ft.Page):
                             level_dd,
                             topic_tf,
                             tts_mode_dd,
-                            stt_mode_dd,
                             auto_tts_sw,
                             ft.ElevatedButton(
                                 "Сохранить настройки",
@@ -751,7 +662,14 @@ async def main(page: ft.Page):
                                 height=48,
                                 on_click=save_settings_click
                             ),
-                            save_status_text
+                            save_status_text,
+                            ft.Divider(),
+                            ft.Text(
+                                f"Версия приложения: {get_app_version()}",
+                                size=12,
+                                color=ft.Colors.GREY_500,
+                                text_align=ft.TextAlign.CENTER
+                            )
                         ],
                         spacing=14,
                         scroll=ft.ScrollMode.AUTO
@@ -807,3 +725,4 @@ async def main(page: ft.Page):
 if __name__ == "__main__":
     ft.app(target=main)
 
+        
