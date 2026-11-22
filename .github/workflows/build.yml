@@ -32,7 +32,7 @@ jobs:
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.27.4'
+          flutter-version: '3.29.0'
           channel: 'stable'
 
       - name: Install dependencies
@@ -40,9 +40,11 @@ jobs:
           pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Build APK
+      - name: Build APK with record_linux fix
         run: |
-          flet build apk --permissions microphone --verbose
+          flet build apk --permissions microphone --verbose || (find /home/runner/.pub-cache -name "record_linux.dart" -exec sed -i 's/Future<bool> hasPermission(String recorderId)/Future<bool> hasPermission(String recorderId, {bool request = true})/g' {} + && flet build apk --permissions microphone --verbose)
+
+          
 
       - name: Rename APK
         run: |
