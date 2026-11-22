@@ -7,6 +7,7 @@ on:
 
 env:
   GRADLE_USER_HOME: ${{ github.workspace }}/.gradle
+  FLET_CACHE_DIR: ${{ github.workspace }}/.flet-cache
 
 jobs:
   build:
@@ -37,6 +38,12 @@ jobs:
         with:
           flutter-version: '3.47.9'
           channel: 'stable'
+
+      - name: Clear Flet and Gradle caches
+        run: |
+          rm -rf $FLET_CACHE_DIR
+          rm -rf $GRADLE_USER_HOME/caches
+          echo "Caches cleared."
 
       - name: Create Gradle init script to use Google Maven Central mirror
         run: |
@@ -78,6 +85,7 @@ jobs:
         run: |
           flet build apk \
             --yes \
+            --python-version 3.12 \
             --android-signing-key-store ${{ github.workspace }}/android-release.jks \
             --android-signing-key-store-password "${{ secrets.ANDROID_KEYSTORE_PASSWORD }}" \
             --android-signing-key-alias "${{ secrets.ANDROID_KEY_ALIAS }}" \
