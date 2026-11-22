@@ -278,7 +278,7 @@ async def main(page: ft.Page):
                 encoder=far.AudioEncoder.WAV
             )
         )
-        page.overlay.append(recorder)
+        page.services.append(recorder)
         page.update()
 
         is_recording = False
@@ -360,11 +360,11 @@ async def main(page: ft.Page):
 
             try:
                 b64_audio = await asyncio.to_thread(_sync_get_tts_base64, clean_text)
-                for item in list(page.overlay):
+                for item in list(page.services):
                     if isinstance(item, fta.Audio):
-                        page.overlay.remove(item)
+                        page.services.remove(item)
                 player = fta.Audio(src_base64=b64_audio, autoplay=True, playback_rate=0.7)
-                page.overlay.append(player)
+                page.services.append(player)
                 page.update()
             except Exception as e:
                 chat_list.controls.append(

@@ -5,6 +5,7 @@ description = "AI English Tutor with Voice and Dictionary"
 requires-python = ">=3.12"
 dependencies = [
     "flet>=1.1.2",
+    "flet-audio>=1.1.2",
     "flet-audio-recorder>=1.0.0",
     "SpeechRecognition",
     "pyjnius"
@@ -13,7 +14,7 @@ dependencies = [
 [tool.flet]
 org = "com.aitutor"
 product = "English Tutor"
-build_number = 6
+build_number = 7
 
 [tool.flet.android]
 min_sdk_version = 24
