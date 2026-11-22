@@ -17,7 +17,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
-          python-version: '3.12'
+          python-version: '3.10'
 
       - name: Set up Java
         uses: actions/setup-java@v5
@@ -40,10 +40,6 @@ jobs:
           pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Install flet-sherpa-onnx (without dependencies)
-        run: |
-          pip install flet-sherpa-onnx==0.2.1 --no-deps
-
       - name: Decode Keystore
         run: |
           echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > android-release.jks
@@ -52,6 +48,7 @@ jobs:
         run: |
           flet build apk \
             --permissions microphone \
+            --include-packages flet_audio_recorder \
             --android-signing-key-store android-release.jks \
             --android-signing-key-store-password "${{ secrets.ANDROID_KEYSTORE_PASSWORD }}" \
             --android-signing-key-alias "${{ secrets.ANDROID_KEY_ALIAS }}" \
