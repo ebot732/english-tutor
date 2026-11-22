@@ -11,6 +11,13 @@ import urllib.parse
 import urllib.error
 import flet as ft
 import flet_audio as fta
+from flet_stt import FletStt
+
+# Безопасный импорт pyjnius (для работы на ПК без Android)
+try:
+    from jnius import autoclass
+except ImportError:
+    autoclass = None
 
 STORAGE_DIR = os.getenv("FLET_APP_STORAGE_DATA") or tempfile.gettempdir()
 DB_PATH = os.path.join(STORAGE_DIR, "tutor_data.db")
@@ -25,7 +32,7 @@ def get_app_version() -> str:
         build = data.get("tool", {}).get("flet", {}).get("build_number", 1)
         return f"{ver} (сборка {build})"
     except Exception:
-        return "1.2.0"
+        return "1.4.0"
 
 
 def get_provider_key_name(provider: str) -> str:
@@ -69,12 +76,11 @@ def init_db():
         "level": "A1-A2 (Начальный)",
         "topic": "Путешествия и кафе",
         "auto_tts": "1",
-        "tts_mode": "Бесплатный голос (без траты API)"
+        "tts_mode": "Бесплатный голос (Android TTS)"
     }
     for k, v in defaults.items():
         cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (k, v))
 
-    # Перенос старого общего ключа (если был сохранён ранее) в ячейку текущего провайдера
     cursor.execute("SELECT value FROM settings WHERE key = 'api_key'")
     old_row = cursor.fetchone()
     if old_row and old_row[0]:
@@ -159,7 +165,6 @@ def _sync_get_tts_base64(clean_text: str) -> str:
     tts_mode = get_setting("tts_mode").strip() or "Голос ИИ (OpenAI TTS)"
     last_err = "Нет доступного сервиса озвучки"
 
-    # 1. Если выбран "Голос ИИ" и подключен ProxyAPI или VseGPT
     if tts_mode == "Голос ИИ (OpenAI TTS)" and provider in ("ProxyAPI", "VseGPT") and api_key:
         try:
             url = f"{base_url}/audio/speech"
@@ -182,7 +187,6 @@ def _sync_get_tts_base64(clean_text: str) -> str:
         except Exception as e:
             last_err = f"TTS API: {e}"
 
-    # 2. Если выбран "Бесплатный голос" или включен OpenRouter (или ИИ-озвучка недоступна)
     free_urls = [
         f"https://streamelements.com?{urllib.parse.urlencode({'voice': 'Brian', 'text': normalized[:200]})}",
         f"https://google.com?{urllib.parse.urlencode({'ie': 'UTF-8', 'q': normalized[:200], 'tl': 'en', 'client': 'gtx'})}"
@@ -199,6 +203,22 @@ def _sync_get_tts_base64(clean_text: str) -> str:
 
     raise RuntimeError(last_err)
 
+# --- НОВАЯ ФУНКЦИЯ: Нативный Android TTS (Бесплатный) ---
+def _sync_android_tts(text: str) -> None:
+    if autoclass is None:
+        raise RuntimeError("pyjnius не установлен. Используйте Голос ИИ.")
+    try:
+        TextToSpeech = autoclass('android.speech.tts.TextToSpeech')
+        PythonActivity = autoclass('org.kivy.android.PythonActivity')
+        Locale = autoclass('java.util.Locale')
+        
+        context = PythonActivity.mActivity
+        tts = TextToSpeech(context, None)
+        tts.setLanguage(Locale.US)
+        # QUEUE_FLUSH=0 (перебивает текущую озвучку)
+        tts.speak(text, 0, None, "utterance_id")
+    except Exception as e:
+        raise RuntimeError(f"Ошибка Android TTS: {e}")
 
 def build_system_prompt() -> str:
     level = get_setting("level")
@@ -244,10 +264,45 @@ async def main(page: ft.Page):
 
         chat_list = ft.ListView(expand=True, spacing=12, padding=15, auto_scroll=True)
 
+        # --- НОВАЯ ЛОГИКА STT (Распознавание речи с микрофона) ---
+        stt = FletStt()
+
+        async def on_stt_result(e):
+            data = json.loads(e.data)
+            if data.get("final"):
+                user_input.value = data["text"]
+                page.update()
+                await send_message()
+
+        stt.on_result = on_stt_result
+
+        async def mic_button_click(e):
+            try:
+                success = await stt.initialize()
+                if success:
+                    await stt.listen(locale_id="en_US") # Слушаем на английском
+                else:
+                    show_snack("Не удалось получить доступ к микрофону", ft.Colors.RED_600)
+            except Exception as ex:
+                show_snack(f"Ошибка микрофона: {ex}", ft.Colors.RED_600)
+
         async def speak_text(english_text: str):
             clean_text = extract_english_part(english_text)
             if not clean_text:
                 return
+            
+            tts_mode = get_setting("tts_mode").strip()
+
+            # Использование бесплатного Android TTS
+            if tts_mode == "Бесплатный голос (Android TTS)":
+                try:
+                    await asyncio.to_thread(_sync_android_tts, clean_text)
+                except Exception as e:
+                    chat_list.controls.append(build_message_bubble("error", f"🔊 {e}"))
+                    page.update()
+                return # Прерываем, чтобы не делать запрос к платному API
+
+            # Стандартная логика (API)
             try:
                 b64_audio = await asyncio.to_thread(_sync_get_tts_base64, clean_text)
 
@@ -258,7 +313,6 @@ async def main(page: ft.Page):
                 player = fta.Audio(src_base64=b64_audio, autoplay=True, playback_rate=0.7)
                 page.overlay.append(player)
                 page.update()
-                #player.play()
             except Exception as e:
                 chat_list.controls.append(
                     build_message_bubble("error", f"🔊 Ошибка озвучки: {e}")
@@ -361,8 +415,6 @@ async def main(page: ft.Page):
                 alignment=ft.MainAxisAlignment.END if is_user else ft.MainAxisAlignment.START
             )
 
-#####
-
         def load_chat_history():
             chat_list.controls.clear()
             conn = sqlite3.connect(DB_PATH)
@@ -432,10 +484,6 @@ async def main(page: ft.Page):
             page.update()
             show_snack("История диалога очищена")
 
-        async def mic_button_click(e):
-            await user_input.focus()
-            show_snack("Нажмите значок микрофона на открывшейся клавиатуре телефона (язык EN)!", ft.Colors.BLUE_700)
-
         chat_view = ft.Column(
             [
                 ft.Container(
@@ -461,7 +509,7 @@ async def main(page: ft.Page):
                             ft.IconButton(
                                 icon=ft.Icons.MIC_ROUNDED,
                                 icon_color=ft.Colors.BLUE_600,
-                                tooltip="Голосовой ввод с клавиатуры",
+                                tooltip="Голосовой ввод",
                                 on_click=lambda e: page.run_task(mic_button_click, e)
                             ),
                             user_input,
@@ -547,8 +595,6 @@ async def main(page: ft.Page):
             visible=False
         )
 
-#########
-
         initial_provider = get_setting("provider") or "OpenRouter (Бесплатно)"
 
         api_key_tf = ft.TextField(
@@ -593,12 +639,13 @@ async def main(page: ft.Page):
             hint_text="Например: Заказ еды, Собеседование, Хобби"
         )
 
+        # ОБНОВЛЕННЫЙ СПИСОК ОЗВУЧКИ
         tts_mode_dd = ft.Dropdown(
             label="Тип озвучки учителя",
             value=get_setting("tts_mode") or "Голос ИИ (OpenAI TTS)",
             options=[
                 ft.dropdown.Option("Голос ИИ (OpenAI TTS)"),
-                ft.dropdown.Option("Бесплатный голос (без траты API)"),
+                ft.dropdown.Option("Бесплатный голос (Android TTS)"),
             ]
         )
 
@@ -724,5 +771,3 @@ async def main(page: ft.Page):
 
 if __name__ == "__main__":
     ft.app(target=main)
-
-        
