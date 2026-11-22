@@ -14,7 +14,6 @@ import flet_audio as fta
 import flet_audio_recorder as far
 import speech_recognition as sr
 
-# Безопасный импорт pyjnius (для работы на ПК без Android)
 try:
     from jnius import autoclass
 except ImportError:
@@ -204,7 +203,6 @@ def _sync_get_tts_base64(clean_text: str) -> str:
 
     raise RuntimeError(last_err)
 
-# --- НАТИВНЫЙ ANDROID TTS (Бесплатный) ---
 def _sync_android_tts(text: str) -> None:
     if autoclass is None:
         raise RuntimeError("pyjnius не установлен. Используйте Голос ИИ.")
@@ -220,7 +218,6 @@ def _sync_android_tts(text: str) -> None:
     except Exception as e:
         raise RuntimeError(f"Ошибка Android TTS: {e}")
 
-# --- РАСПОЗНАВАНИЕ РЕЧИ (Бесплатный Google Web Speech API) ---
 def _sync_recognize_audio(file_path: str) -> str:
     if not os.path.exists(file_path):
         raise RuntimeError("Файл записи не найден")
@@ -257,8 +254,6 @@ def extract_english_part(text: str) -> str:
     return cleaned
 
 
-#############
-
 async def main(page: ft.Page):
     try:
         init_db()
@@ -278,7 +273,6 @@ async def main(page: ft.Page):
 
         chat_list = ft.ListView(expand=True, spacing=12, padding=15, auto_scroll=True)
 
-        # --- ЛОГИКА STT (Запись + Распознавание) ---
         recorder = far.AudioRecorder(
             configuration=far.AudioRecorderConfiguration(
                 encoder=far.AudioEncoder.WAV
@@ -290,7 +284,6 @@ async def main(page: ft.Page):
         is_recording = False
         temp_audio_path = os.path.join(STORAGE_DIR, "temp_recording.wav")
 
-        # Кнопка-переключатель микрофона
         mic_button = ft.IconButton(
             icon=ft.Icons.MIC_ROUNDED,
             icon_color=ft.Colors.BLUE_600,
@@ -300,7 +293,6 @@ async def main(page: ft.Page):
         async def mic_button_click(e):
             nonlocal is_recording
             if is_recording:
-                # Останавливаем запись и распознаём
                 try:
                     await recorder.stop_recording()
                     is_recording = False
@@ -324,15 +316,12 @@ async def main(page: ft.Page):
                     page.update()
                     show_snack(f"Ошибка распознавания: {ex}", ft.Colors.RED_600)
             else:
-                # Начинаем запись
                 try:
-                    # Запрашиваем разрешение (метод has_permission есть в flet-audio-recorder)
                     has_perm = await recorder.has_permission()
                     if not has_perm:
                         show_snack("Разрешение на микрофон не выдано", ft.Colors.RED_600)
                         return
 
-                    # Удаляем старый файл, если был
                     if os.path.exists(temp_audio_path):
                         try:
                             os.remove(temp_audio_path)
@@ -361,7 +350,6 @@ async def main(page: ft.Page):
 
             tts_mode = get_setting("tts_mode").strip()
 
-            # Использование бесплатного Android TTS
             if tts_mode == "Бесплатный голос (Android TTS)":
                 try:
                     await asyncio.to_thread(_sync_android_tts, clean_text)
@@ -370,7 +358,6 @@ async def main(page: ft.Page):
                     page.update()
                 return
 
-            # Стандартная логика (API)
             try:
                 b64_audio = await asyncio.to_thread(_sync_get_tts_base64, clean_text)
                 for item in list(page.overlay):

@@ -6,7 +6,7 @@ requires-python = ">=3.10"
 dependencies = [
     "flet==0.28.3",
     "flet-audio",
-    "flet-audio-recorder",
+    "flet-audio-recorder==0.1.0",
     "SpeechRecognition",
     "pyjnius"
 ]
@@ -16,11 +16,15 @@ org = "com.aitutor"
 product = "English Tutor"
 build_number = 5
 
-# Указываем Flutter-плагины, которые нужно включить в сборку
+# Подключаем Flutter-плагин записи звука
 [tool.flet.flutter.dependencies]
-flet_audio_recorder = "0.1.0" # или версия, совместимая с вашим Flet 0.28.3
+flet_audio_recorder = "0.1.0"
 
-# Явно задаём разрешения для Android
+# Указываем minSdkVersion 23, иначе record_android не соберётся
+[tool.flet.android]
+min_sdk_version = 23
+
+# Явно задаём разрешения для микрофона
 [tool.flet.android.permission]
 "android.permission.RECORD_AUDIO" = true
 "android.permission.MODIFY_AUDIO_SETTINGS" = true
