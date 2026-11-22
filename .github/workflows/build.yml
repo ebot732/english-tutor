@@ -78,7 +78,7 @@ jobs:
         run: |
           flet build apk \
             --yes \
-            --android-signing-key-store android-release.jks \
+            --android-signing-key-store ${{ github.workspace }}/android-release.jks \
             --android-signing-key-store-password "${{ secrets.ANDROID_KEYSTORE_PASSWORD }}" \
             --android-signing-key-alias "${{ secrets.ANDROID_KEY_ALIAS }}" \
             --android-signing-key-password "${{ secrets.ANDROID_KEY_PASSWORD }}" \
