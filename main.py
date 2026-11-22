@@ -290,7 +290,7 @@ async def main(page: ft.Page):
         is_recording = False
         temp_audio_path = os.path.join(STORAGE_DIR, "temp_recording.wav")
 
-        # Кнопка-переключатель микрофона (создаём заранее, чтобы менять иконку)
+        # Кнопка-переключатель микрофона
         mic_button = ft.IconButton(
             icon=ft.Icons.MIC_ROUNDED,
             icon_color=ft.Colors.BLUE_600,
@@ -326,7 +326,7 @@ async def main(page: ft.Page):
             else:
                 # Начинаем запись
                 try:
-                    # Запрашиваем разрешение (в flet-audio-recorder этот метод и запрашивает, и возвращает статус)
+                    # Запрашиваем разрешение (метод has_permission есть в flet-audio-recorder)
                     has_perm = await recorder.has_permission()
                     if not has_perm:
                         show_snack("Разрешение на микрофон не выдано", ft.Colors.RED_600)
