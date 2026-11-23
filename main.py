@@ -9,6 +9,7 @@ import traceback
 import urllib.request
 import urllib.parse
 import urllib.error
+import httpx  # <-- ДОБАВЛЕНО для асинхронных запросов к ИИ
 import flet as ft
 import flet_audio as fta
 import flet_audio_recorder as far
@@ -126,7 +127,9 @@ def get_ai_config() -> tuple[str, str, str]:
     else:
         return "https://openrouter.ai/api/v1", api_key, "openrouter/free"
 
-def _sync_ask_llm(messages: list[dict], temperature: float) -> str:
+
+# --- ОБНОВЛЕНО: Полностью асинхронный запрос к ИИ через httpx ---
+async def ask_llm(messages: list[dict], temperature: float = 0.7) -> str:
     base_url, api_key, model = get_ai_config()
     url = f"{base_url}/chat/completions"
     headers = {
@@ -136,28 +139,28 @@ def _sync_ask_llm(messages: list[dict], temperature: float) -> str:
         "X-Title": "EnglishTutorApp",
         "User-Agent": "EnglishTutorApp/1.0"
     }
-    payload = json.dumps({
+    payload = {
         "model": model,
         "messages": messages,
         "temperature": temperature
-    }).encode("utf-8")
+    }
 
-    req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
-    try:
-        with urllib.request.urlopen(req, timeout=45) as resp:
-            raw = resp.read().decode("utf-8")
-            data = json.loads(raw)
+    async with httpx.AsyncClient(timeout=45.0) as client:
+        try:
+            response = await client.post(url, headers=headers, json=payload)
+            response.raise_for_status()
+            data = response.json()
             if "error" in data:
                 raise RuntimeError(str(data["error"]))
             return data["choices"][0]["message"]["content"].strip()
-    except urllib.error.HTTPError as e:
-        err_body = e.read().decode("utf-8", errors="ignore")
-        raise RuntimeError(f"Ошибка сервера {e.code} ({base_url}): {err_body[:200]}")
+        except httpx.HTTPStatusError as e:
+            err_body = e.response.text
+            raise RuntimeError(f"Ошибка сервера {e.response.status_code} ({base_url}): {err_body[:200]}")
+        except httpx.RequestError as e:
+            raise RuntimeError(f"Ошибка сети ({base_url}): {e}")
 
 
-async def ask_llm(messages: list[dict], temperature: float = 0.7) -> str:
-    return await asyncio.to_thread(_sync_ask_llm, messages, temperature)
-
+# --- ОСТАЛЬНЫЕ СИНХРОННЫЕ ФУНКЦИИ ДЛЯ TTS ОСТАВЛЕНЫ БЕЗ ИЗМЕНЕНИЙ ---
 def _sync_get_tts_base64(clean_text: str) -> str:
     normalized = " ".join(clean_text.split())[:400]
     base_url, api_key, _ = get_ai_config()
@@ -282,7 +285,8 @@ async def main(page: ft.Page):
         page.update()
 
         is_recording = False
-        temp_audio_path = os.path.join(STORAGE_DIR, "temp_recording.wav")
+        # ИСПРАВЛЕНО: используем нативную временную директорию Android
+        temp_audio_path = os.path.join(page.get_storage_paths().temp, "temp_recording.wav")
 
         mic_button = ft.IconButton(
             icon=ft.Icons.MIC_ROUNDED,
@@ -328,7 +332,12 @@ async def main(page: ft.Page):
                         except Exception:
                             pass
 
-                    await recorder.start_recording(output_path=temp_audio_path)
+                    # ИСПРАВЛЕНО: проверяем, началась ли запись
+                    success = await recorder.start_recording(output_path=temp_audio_path)
+                    if not success:
+                        show_snack("Не удалось начать запись (микрофон занят)", ft.Colors.RED_600)
+                        return
+
                     is_recording = True
                     mic_button.icon = ft.Icons.STOP_CIRCLE_ROUNDED
                     mic_button.icon_color = ft.Colors.RED_400
