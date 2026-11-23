@@ -89,16 +89,16 @@ def init_db():
 
     cursor.execute("SELECT value FROM settings WHERE key = 'api_key'")
     old_row = cursor.fetchone()
-    if old_row and old_row[0]:
+    if old_row and old_row:
         cursor.execute("SELECT value FROM settings WHERE key = 'provider'")
         prov_row = cursor.fetchone()
-        target_key = get_provider_key_name(prov_row[0] if prov_row else "")
-        cursor.execute("UPDATE settings SET value = ? WHERE key = ? AND value = ''", (old_row[0], target_key))
+        target_key = get_provider_key_name(prov_row if prov_row else "")
+        cursor.execute("UPDATE settings SET value = ? WHERE key = ? AND value = ''", (old_row, target_key))
         cursor.execute("DELETE FROM settings WHERE key = 'api_key'")
 
     conn.commit()
     conn.close()
-
+####
 
 def get_setting(key: str) -> str:
     if key == "api_key":
@@ -108,7 +108,7 @@ def get_setting(key: str) -> str:
     cursor.execute("SELECT value FROM settings WHERE key = ?", (key,))
     row = cursor.fetchone()
     conn.close()
-    return str(row[0]) if row and row[0] is not None else ""
+    return str(row) if row and row is not None else ""
 
 
 def set_setting(key: str, value: str):
@@ -126,12 +126,12 @@ def get_ai_config() -> tuple[str, str, str]:
     api_key = get_setting(get_provider_key_name(provider)).strip()
 
     if provider == "ProxyAPI":
-        return "https://proxyapi.ru", api_key, "gpt-4o-mini"
+        return "https://api.proxyapi.ru/v1", api_key, "openai/gpt-4o-mini"
     elif provider == "VseGPT":
-        return "https://vsegpt.ru", api_key, "openai/gpt-4o-mini"
+        return "https://api.vsegpt.ru/v1", api_key, "openai/gpt-4o-mini"
     else:
-        return "https://openrouter.ai", api_key, "openrouter/free"
-#############
+        return "https://openrouter.ai/api/v1", api_key, "openrouter/free"
+
 
 async def ask_llm(messages: list[dict], temperature: float = 0.7) -> str:
     base_url, api_key, model = get_ai_config()
@@ -156,7 +156,7 @@ async def ask_llm(messages: list[dict], temperature: float = 0.7) -> str:
             data = response.json()
             if "error" in data:
                 raise RuntimeError(str(data["error"]))
-            return data["choices"][0]["message"]["content"].strip()
+            return data["choices"]["message"]["content"].strip()
         except httpx.HTTPStatusError as e:
             err_body = e.response.text
             raise RuntimeError(f"Ошибка сервера {e.response.status_code} ({base_url}): {err_body[:200]}")
@@ -277,7 +277,7 @@ def extract_english_part(text: str) -> str:
     cleaned = re.sub(r'\(.*?\)', '', text, flags=re.DOTALL)
     cleaned = cleaned.replace("**", "").strip()
     return cleaned
-##########
+#########
 
 async def main(page: ft.Page):
     try:
@@ -406,7 +406,7 @@ async def main(page: ft.Page):
             expand=True,
             border_radius=20,
             bgcolor=ft.Colors.WHITE,
-            content_padding=ft.padding.symmetric(horizontal=16, vertical=10),
+            content_padding=ft.Padding.symmetric(horizontal=16, vertical=10),
             on_submit=lambda e: page.run_task(send_message)
         )
         loading_indicator = ft.ProgressBar(visible=False, color=ft.Colors.BLUE_600)
@@ -443,11 +443,11 @@ async def main(page: ft.Page):
             word_chips = []
             for w in set(new_words):
                 word_chips.append(
-                    ft.ElevatedButton(
-                        text=f"+ {w}",
+                    ft.Button(
+                        content=f"+ {w}",
                         icon=ft.Icons.BOOKMARK_ADD_OUTLINED,
                         style=ft.ButtonStyle(
-                            padding=ft.padding.symmetric(horizontal=10, vertical=4),
+                            padding=ft.Padding.symmetric(horizontal=10, vertical=4),
                             bgcolor=ft.Colors.AMBER_100,
                             color=ft.Colors.BLACK87,
                         ),
@@ -496,7 +496,7 @@ async def main(page: ft.Page):
                 ],
                 alignment=ft.MainAxisAlignment.END if is_user else ft.MainAxisAlignment.START
             )
-#########
+###########
 
         def load_chat_history():
             chat_list.controls.clear()
@@ -581,7 +581,7 @@ async def main(page: ft.Page):
                         ],
                         alignment=ft.MainAxisAlignment.SPACE_BETWEEN
                     ),
-                    padding=ft.padding.symmetric(horizontal=16, vertical=8),
+                    padding=ft.Padding.symmetric(horizontal=16, vertical=8),
                     bgcolor=ft.Colors.WHITE
                 ),
                 loading_indicator,
@@ -662,7 +662,7 @@ async def main(page: ft.Page):
             [
                 ft.Container(
                     content=ft.Text("Мой словарь", size=18, weight=ft.FontWeight.BOLD),
-                    padding=ft.padding.symmetric(horizontal=16, vertical=14),
+                    padding=ft.Padding.symmetric(horizontal=16, vertical=14),
                     bgcolor=ft.Colors.WHITE,
                     width=float("inf")
                 ),
@@ -672,6 +672,7 @@ async def main(page: ft.Page):
             spacing=0,
             visible=False
         )
+########
 
         initial_provider = get_setting("provider") or "ProxyAPI"
 
@@ -693,7 +694,7 @@ async def main(page: ft.Page):
         provider_dd = ft.Dropdown(
             label="Провайдер ИИ",
             value=initial_provider,
-            on_change=on_provider_change,
+            on_select=on_provider_change,
             options=[
                 ft.dropdown.Option("ProxyAPI"),
                 ft.dropdown.Option("VseGPT"),
@@ -745,8 +746,6 @@ async def main(page: ft.Page):
                 save_status_text.value = f"✅ Настройки и ключ для {selected_provider} сохранены!"
                 save_status_text.color = ft.Colors.GREEN_700
                 page.update()
-###########
-
                 show_snack("Настройки успешно сохранены!", ft.Colors.GREEN_700)
             except Exception as ex:
                 save_status_text.value = f"❌ Ошибка сохранения: {ex}"
@@ -757,7 +756,7 @@ async def main(page: ft.Page):
             [
                 ft.Container(
                     content=ft.Text("Настройки обучения и ИИ", size=18, weight=ft.FontWeight.BOLD),
-                    padding=ft.padding.symmetric(horizontal=16, vertical=14),
+                    padding=ft.Padding.symmetric(horizontal=16, vertical=14),
                     bgcolor=ft.Colors.WHITE,
                     width=float("inf")
                 ),
@@ -778,8 +777,8 @@ async def main(page: ft.Page):
                             topic_tf,
                             tts_mode_dd,
                             auto_tts_sw,
-                            ft.ElevatedButton(
-                                text="Сохранить настройки",
+                            ft.Button(
+                                content="Сохранить настройки",
                                 icon=ft.Icons.SAVE,
                                 bgcolor=ft.Colors.BLUE_600,
                                 color=ft.Colors.WHITE,
@@ -848,5 +847,4 @@ async def main(page: ft.Page):
 
 
 if __name__ == "__main__":
-    ft.app(main)
-
+    ft.run(main)
