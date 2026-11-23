@@ -6,7 +6,7 @@ requires-python = ">=3.12"
 dependencies = [
     "flet>=1.1.2",
     "flet-audio>=1.1.2",
-    "flet-audio-recorder>=1.0.0",
+    "flet-audio-recorder>=1.1.0",
     "SpeechRecognition",
     "pyjnius"
 ]
@@ -14,7 +14,7 @@ dependencies = [
 [tool.flet]
 org = "com.aitutor"
 product = "English Tutor"
-build_number = 10
+build_number = 11
 
 [tool.flet.android]
 min_sdk_version = 24

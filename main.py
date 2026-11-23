@@ -9,7 +9,7 @@ import traceback
 import urllib.request
 import urllib.parse
 import urllib.error
-import httpx  # <-- ДОБАВЛЕНО для асинхронных запросов к ИИ
+import httpx
 import flet as ft
 import flet_audio as fta
 import flet_audio_recorder as far
@@ -127,8 +127,7 @@ def get_ai_config() -> tuple[str, str, str]:
     else:
         return "https://openrouter.ai/api/v1", api_key, "openrouter/free"
 
-
-# --- ОБНОВЛЕНО: Полностью асинхронный запрос к ИИ через httpx ---
+# --- Полностью асинхронный запрос к ИИ через httpx ---
 async def ask_llm(messages: list[dict], temperature: float = 0.7) -> str:
     base_url, api_key, model = get_ai_config()
     url = f"{base_url}/chat/completions"
@@ -159,8 +158,7 @@ async def ask_llm(messages: list[dict], temperature: float = 0.7) -> str:
         except httpx.RequestError as e:
             raise RuntimeError(f"Ошибка сети ({base_url}): {e}")
 
-
-# --- ОСТАЛЬНЫЕ СИНХРОННЫЕ ФУНКЦИИ ДЛЯ TTS ОСТАВЛЕНЫ БЕЗ ИЗМЕНЕНИЙ ---
+# --- Синхронные функции для TTS (вызываются через asyncio.to_thread) ---
 def _sync_get_tts_base64(clean_text: str) -> str:
     normalized = " ".join(clean_text.split())[:400]
     base_url, api_key, _ = get_ai_config()
@@ -285,8 +283,9 @@ async def main(page: ft.Page):
         page.update()
 
         is_recording = False
-        # ИСПРАВЛЕНО
-        temp_audio_path = os.path.join(os.getenv("FLET_APP_STORAGE_TEMP", tempfile.gettempdir()), "temp_recording.wav")
+        # ИСПОЛЬЗУЕМ StoragePaths ДЛЯ ПОЛУЧЕНИЯ ДИРЕКТОРИИ ДОКУМЕНТОВ
+        docs_dir = await ft.StoragePaths().get_application_documents_directory()
+        temp_audio_path = os.path.join(docs_dir, "temp_recording.wav")
 
         mic_button = ft.IconButton(
             icon=ft.Icons.MIC_ROUNDED,
@@ -332,7 +331,7 @@ async def main(page: ft.Page):
                         except Exception:
                             pass
 
-                    # ИСПРАВЛЕНО: проверяем, началась ли запись
+                    # ПРОВЕРЯЕМ РЕЗУЛЬТАТ ЗАПИСИ
                     success = await recorder.start_recording(output_path=temp_audio_path)
                     if not success:
                         show_snack("Не удалось начать запись (микрофон занят)", ft.Colors.RED_600)
