@@ -285,8 +285,8 @@ async def main(page: ft.Page):
         page.update()
 
         is_recording = False
-        # ИСПРАВЛЕНО: используем нативную временную директорию Android
-        temp_audio_path = os.path.join(page.get_storage_paths().temp, "temp_recording.wav")
+        # ИСПРАВЛЕНО
+        temp_audio_path = os.path.join(os.getenv("FLET_APP_STORAGE_TEMP", tempfile.gettempdir()), "temp_recording.wav")
 
         mic_button = ft.IconButton(
             icon=ft.Icons.MIC_ROUNDED,
