@@ -1,3 +1,4 @@
+# === ФРАГМЕНТ 1 из 7 ===
 import os
 import re
 import json
@@ -50,6 +51,15 @@ def get_provider_key_name(provider: str) -> str:
     return "api_key_openrouter"
 
 
+def _clean_tuple_str(val: str) -> str:
+    s = (val or "").strip()
+    if s.startswith("('") and s.endswith("',)"):
+        return s[2:-3]
+    if s.startswith('("') and s.endswith('",)'):
+        return s[2:-3]
+    return s
+
+
 def init_db():
     os.makedirs(STORAGE_DIR, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
@@ -87,20 +97,27 @@ def init_db():
     }
     for k, v in defaults.items():
         cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (k, v))
-##############2222
+
+    # Автоочистка значений, сохраненных ранее со скобками кортежа ('...',)
+    cursor.execute("SELECT key, value FROM settings")
+    for k, v in cursor.fetchall():
+        cleaned = _clean_tuple_str(str(v))
+        if cleaned != str(v):
+            cursor.execute("UPDATE settings SET value = ? WHERE key = ?", (cleaned, k))
+
     cursor.execute("SELECT value FROM settings WHERE key = 'api_key'")
     old_row = cursor.fetchone()
-    if old_row and old_row:
+    if old_row and old_row[0]:
         cursor.execute("SELECT value FROM settings WHERE key = 'provider'")
         prov_row = cursor.fetchone()
-        target_key = get_provider_key_name(prov_row if prov_row else "")
-        cursor.execute("UPDATE settings SET value = ? WHERE key = ? AND value = ''", (old_row, target_key))
+        target_key = get_provider_key_name(prov_row[0] if prov_row else "")
+        cursor.execute("UPDATE settings SET value = ? WHERE key = ? AND value = ''", (old_row[0], target_key))
         cursor.execute("DELETE FROM settings WHERE key = 'api_key'")
 
     conn.commit()
     conn.close()
 
-
+# === ФРАГМЕНТ 2 из 7 ===
 def get_setting(key: str) -> str:
     if key == "api_key":
         key = get_provider_key_name(get_setting("provider"))
@@ -109,7 +126,7 @@ def get_setting(key: str) -> str:
     cursor.execute("SELECT value FROM settings WHERE key = ?", (key,))
     row = cursor.fetchone()
     conn.close()
-    return str(row) if row and row is not None else ""
+    return _clean_tuple_str(str(row[0])) if row and row[0] is not None else ""
 
 
 def set_setting(key: str, value: str):
@@ -157,17 +174,18 @@ async def ask_llm(messages: list[dict], temperature: float = 0.7) -> str:
             data = response.json()
             if "error" in data:
                 raise RuntimeError(str(data["error"]))
-            return data["choices"]["message"]["content"].strip()
+            return data["choices"][0]["message"]["content"].strip()
         except httpx.HTTPStatusError as e:
             err_body = e.response.text
             raise RuntimeError(f"Ошибка сервера {e.response.status_code} ({base_url}): {err_body[:200]}")
         except httpx.RequestError as e:
             raise RuntimeError(f"Ошибка сети ({base_url}): {e}")
-############33333333333
+
+
 def _get_android_activity():
     if autoclass is None:
         return None
-    for cls_name in ("org.kivy.android.PythonActivity", "com.flet.app.MainActivity"):
+    for cls_name in ("com.flet.app.MainActivity", "org.kivy.android.PythonActivity"):
         try:
             cls = autoclass(cls_name)
             if hasattr(cls, "mActivity") and cls.mActivity is not None:
@@ -176,52 +194,115 @@ def _get_android_activity():
             pass
     try:
         ActivityThread = autoclass("android.app.ActivityThread")
-        return ActivityThread.currentApplication()
+        app = ActivityThread.currentApplication()
+        if app is not None:
+            return app
     except Exception:
-        return None
+        pass
+    return None
 
-
+# === ФРАГМЕНТ 3 из 7 ===
 def _sync_android_stt() -> str:
     if autoclass is None:
         raise RuntimeError("Распознавание средствами телефона доступно только в APK на Android.")
     try:
         Intent = autoclass("android.content.Intent")
         RecognizerIntent = autoclass("android.speech.RecognizerIntent")
-        PythonActivity = autoclass("org.kivy.android.PythonActivity")
-        activity = PythonActivity.mActivity
+        SpeechRecognizer = autoclass("android.speech.SpeechRecognizer")
+        Looper = autoclass("android.os.Looper")
+        Handler = autoclass("android.os.Handler")
 
-        intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
-        intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-        intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE, "en-US")
-        intent.putExtra(RecognizerIntent.EXTRA_PROMPT, "Speak in English...")
+        context = _get_android_activity()
+        if context is None:
+            raise RuntimeError("Не удалось получить контекст Android.")
 
-        pm = activity.getPackageManager()
-        if intent.resolveActivity(pm) is None:
-            raise RuntimeError("На телефоне не установлен сервис распознавания речи Google.")
+        if not SpeechRecognizer.isRecognitionAvailable(context):
+            raise RuntimeError("На телефоне не установлен сервис распознавания речи Google (приложение Google).")
 
         result_holder = {"text": "", "error": None}
         done_event = threading.Event()
 
-        from android import activity as android_activity
-        REQ_CODE = 9042
+        class RecognitionListener(PythonJavaClass):
+            __javainterfaces__ = ["android/speech/RecognitionListener"]
+            __javacontext__ = "app"
 
-        def on_activity_result(request_code, result_code, data):
-            if request_code != REQ_CODE:
-                return
-            android_activity.unbind(on_activity_result=on_activity_result)
-            try:
-                if result_code == -1 and data is not None:
-                    matches = data.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
-                    if matches and matches.size() > 0:
-                        result_holder["text"] = str(matches.get(0))
-            except Exception as ex:
-                result_holder["error"] = str(ex)
-            finally:
+            @java_method("(Landroid/os/Bundle;)V")
+            def onReadyForSpeech(self, params):
+                pass
+
+            @java_method("()V")
+            def onBeginningOfSpeech(self):
+                pass
+
+            @java_method("(F)V")
+            def onRmsChanged(self, rmsdB):
+                pass
+
+            @java_method("([B)V")
+            def onBufferReceived(self, buffer):
+                pass
+
+            @java_method("()V")
+            def onEndOfSpeech(self):
+                pass
+
+            @java_method("(I)V")
+            def onError(self, error):
+                err_map = {
+                    1: "Сетевая ошибка",
+                    2: "Ошибка сети",
+                    3: "Ошибка записи аудио",
+                    4: "Ошибка сервера Google",
+                    5: "Ошибка клиента",
+                    6: "Речь не услышана (таймаут)",
+                    7: "Речь не распознана",
+                    8: "Распознаватель занят",
+                    9: "Нет разрешения на микрофон"
+                }
+                result_holder["error"] = err_map.get(int(error), f"Код ошибки распознавания: {error}")
                 done_event.set()
 
-        android_activity.bind(on_activity_result=on_activity_result)
-        activity.startActivityForResult(intent, REQ_CODE)
-        done_event.wait(timeout=30.0)
+            @java_method("(Landroid/os/Bundle;)V")
+            def onResults(self, results):
+                try:
+                    matches = results.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                    if matches and matches.size() > 0:
+                        result_holder["text"] = str(matches.get(0))
+                except Exception as ex:
+                    result_holder["error"] = str(ex)
+                finally:
+                    done_event.set()
+
+            @java_method("(Landroid/os/Bundle;)V")
+            def onPartialResults(self, partialResults):
+                pass
+
+            @java_method("(ILandroid/os/Bundle;)V")
+            def onEvent(self, eventType, params):
+                pass
+
+        class StartRunnable(PythonJavaClass):
+            __javainterfaces__ = ["java/lang/Runnable"]
+            __javacontext__ = "app"
+
+            @java_method("()V")
+            def run(self):
+                try:
+                    sr = SpeechRecognizer.createSpeechRecognizer(context)
+                    listener = RecognitionListener()
+                    sr.setRecognitionListener(listener)
+                    intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+                    intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                    intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE, "en-US")
+                    intent.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+                    sr.startListening(intent)
+                except Exception as ex:
+                    result_holder["error"] = str(ex)
+                    done_event.set()
+
+        main_handler = Handler(Looper.getMainLooper())
+        main_handler.post(StartRunnable())
+        done_event.wait(timeout=15.0)
 
         if result_holder["error"]:
             raise RuntimeError(result_holder["error"])
@@ -243,7 +324,8 @@ async def recognize_audio_async(file_path: str) -> str:
     base_url, api_key, _ = get_ai_config()
 
     if provider in ("ProxyAPI", "VseGPT") and api_key:
-        url = f"{base_url}/audio/transcriptions"
+        whisper_base = "https://proxyapi.ru" if provider == "ProxyAPI" else base_url
+        url = f"{whisper_base}/audio/transcriptions"
         headers = {"Authorization": f"Bearer {api_key}"}
         async with httpx.AsyncClient(timeout=30.0, verify=False) as client:
             with open(file_path, "rb") as audio_file:
@@ -257,7 +339,8 @@ async def recognize_audio_async(file_path: str) -> str:
                 return (res_json.get("text") or "").strip()
 
     raise RuntimeError("Для распознавания через ИИ нужен ключ ProxyAPI или VseGPT. Переключите режим микрофона на «Средствами телефона (Android)» в Настройках.")
-###########44444444444444
+
+# === ФРАГМЕНТ 4 из 7 ===
 async def get_tts_base64_async(clean_text: str) -> str:
     normalized = " ".join(clean_text.split())[:400]
     base_url, api_key, _ = get_ai_config()
@@ -267,7 +350,8 @@ async def get_tts_base64_async(clean_text: str) -> str:
     async with httpx.AsyncClient(timeout=20.0, verify=False) as client:
         if provider in ("ProxyAPI", "VseGPT") and api_key:
             try:
-                url = f"{base_url}/audio/speech"
+                tts_base = "https://proxyapi.ru" if provider == "ProxyAPI" else base_url
+                url = f"{tts_base}/audio/speech"
                 headers = {
                     "Authorization": f"Bearer {api_key}",
                     "Content-Type": "application/json",
@@ -370,7 +454,8 @@ def extract_english_part(text: str) -> str:
     cleaned = re.sub(r'\(.*?\)', '', text, flags=re.DOTALL)
     cleaned = cleaned.replace("**", "").strip()
     return cleaned
-#############555555555555
+
+# === ФРАГМЕНТ 5 из 7 ===
 async def main(page: ft.Page):
     try:
         init_db()
@@ -416,7 +501,20 @@ async def main(page: ft.Page):
 
             if stt_mode == "Средствами телефона (Android)":
                 try:
+                    has_perm = await recorder.has_permission()
+                    if not has_perm:
+                        show_snack("Выдайте разрешение на микрофон и нажмите кнопку снова", ft.Colors.ORANGE_700, duration=2000)
+                        return
+                    mic_button.icon = ft.Icons.HEARING_ROUNDED
+                    mic_button.icon_color = ft.Colors.RED_400
+                    page.update()
+                    show_snack("Говорите на английском...", ft.Colors.GREEN_700, duration=1500)
+
                     text = await recognize_audio_async("")
+                    mic_button.icon = ft.Icons.MIC_ROUNDED
+                    mic_button.icon_color = ft.Colors.BLUE_600
+                    page.update()
+
                     if text:
                         user_input.value = text
                         page.update()
@@ -424,6 +522,9 @@ async def main(page: ft.Page):
                     else:
                         show_snack("Речь не распознана.", ft.Colors.ORANGE_700, duration=1500)
                 except Exception as ex:
+                    mic_button.icon = ft.Icons.MIC_ROUNDED
+                    mic_button.icon_color = ft.Colors.BLUE_600
+                    page.update()
                     show_snack(str(ex), ft.Colors.RED_600, duration=3000)
                 return
 
@@ -483,7 +584,8 @@ async def main(page: ft.Page):
                     show_snack(f"Ошибка микрофона: {ex}", ft.Colors.RED_600, duration=1000)
 
         mic_button.on_click = lambda e: page.run_task(mic_button_click, e)
-################666666666666
+
+# === ФРАГМЕНТ 6 из 7 ===
         async def speak_text(english_text: str):
             clean_text = extract_english_part(english_text)
             if not clean_text:
@@ -619,7 +721,7 @@ async def main(page: ft.Page):
                 ],
                 alignment=ft.MainAxisAlignment.END if is_user else ft.MainAxisAlignment.START
             )
-##########777777777777777
+
         def load_chat_history():
             chat_list.controls.clear()
             conn = sqlite3.connect(DB_PATH)
@@ -630,6 +732,7 @@ async def main(page: ft.Page):
             for r, c in rows:
                 chat_list.controls.append(build_message_bubble(r, c))
 
+# === ФРАГМЕНТ 8 (часть 1 из бывшего 7-го) ===
         async def send_message():
             text = (user_input.value or "").strip()
             if not text:
@@ -729,7 +832,7 @@ async def main(page: ft.Page):
             expand=True,
             spacing=0
         )
-##############8888888888
+
         dict_list = ft.ListView(expand=True, spacing=8, padding=15)
 
         def delete_word(word_id: int):
@@ -796,6 +899,7 @@ async def main(page: ft.Page):
             visible=False
         )
 
+# === ФРАГМЕНТ 9 (часть 2 из бывшего 7-го) ===
         initial_provider = get_setting("provider") or "ProxyAPI"
 
         api_key_tf = ft.TextField(
@@ -839,7 +943,7 @@ async def main(page: ft.Page):
             value=get_setting("topic") or "Путешествия и кафе",
             hint_text="Например: Заказ еды, Собеседование, Хобби"
         )
-##########################9999999999
+
         tts_mode_dd = ft.Dropdown(
             label="Тип озвучки учителя",
             value=get_setting("tts_mode") or "Бесплатный голос (Android TTS)",
