@@ -307,8 +307,11 @@ async def main(page: ft.Page):
                 encoder=far.AudioEncoder.AACLC
             )
         )
-        page.services.append(recorder)
+        audio_player = fta.Audio(autoplay=True, playback_rate=0.85)
+        page.services.extend([recorder, audio_player])
         page.update()
+
+        
 
         is_recording = False
         temp_audio_path = os.path.join(STORAGE_DIR, "temp_recording.m4a")
@@ -395,17 +398,21 @@ async def main(page: ft.Page):
 
             try:
                 b64_audio = await get_tts_base64_async(clean_text)
-                for item in list(page.services):
-                    if isinstance(item, fta.Audio):
-                        page.services.remove(item)
-                player = fta.Audio(src_base64=b64_audio, autoplay=True, playback_rate=0.85)
-                page.services.append(player)
-                page.update()
+                tts_path = os.path.join(STORAGE_DIR, "tts_reply.mp3")
+                with open(tts_path, "wb") as f:
+                    f.write(base64.b64decode(b64_audio))
+
+                audio_player.src = tts_path
+                audio_player.autoplay = True
+                audio_player.playback_rate = 0.85
+                audio_player.update()
+                await audio_player.play()
             except Exception as e:
                 chat_list.controls.append(
                     build_message_bubble("error", f"🔊 Ошибка озвучки: {e}")
                 )
                 page.update()
+
 
         user_input = ft.TextField(
             hint_text="Напишите или надиктуйте на EN...",
@@ -557,7 +564,9 @@ async def main(page: ft.Page):
                 page.update()
 
                 if get_setting("auto_tts") == "1":
+                    await asyncio.sleep(0.1)
                     await speak_text(ai_reply)
+
 
             except Exception as ex:
                 loading_indicator.visible = False
