@@ -8,6 +8,7 @@ dependencies = [
     "flet-audio>=1.1.2",
     "flet-audio-recorder>=1.1.0",
     "SpeechRecognition",
+    "httpx",
     "pyjnius"
 ]
 
