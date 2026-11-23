@@ -414,8 +414,8 @@ async def main(page: ft.Page):
             word_chips = []
             for w in set(new_words):
                 word_chips.append(
-                    ft.ElevatedButton(
-                        text=f"+ {w}",
+                    ft.Button(
+                        content=f"+ {w}",
                         icon=ft.Icons.BOOKMARK_ADD_OUTLINED,
                         style=ft.ButtonStyle(
                             padding=ft.Padding.symmetric(horizontal=10, vertical=4),
@@ -663,7 +663,7 @@ async def main(page: ft.Page):
         provider_dd = ft.Dropdown(
             label="Провайдер ИИ",
             value=initial_provider,
-            on_select=on_provider_change,  # ← заменено с on_change на on_select
+            on_select=on_provider_change,
             options=[
                 ft.dropdown.Option("OpenRouter (Бесплатно)"),
                 ft.dropdown.Option("ProxyAPI"),
@@ -747,8 +747,8 @@ async def main(page: ft.Page):
                             topic_tf,
                             tts_mode_dd,
                             auto_tts_sw,
-                            ft.ElevatedButton(
-                                "Сохранить настройки",
+                            ft.Button(
+                                content="Сохранить настройки",
                                 icon=ft.Icons.SAVE,
                                 bgcolor=ft.Colors.BLUE_600,
                                 color=ft.Colors.WHITE,
