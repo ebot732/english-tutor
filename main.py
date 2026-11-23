@@ -1,4 +1,4 @@
-# === ФРАГМЕНТ 1 из 6 ===
+# === ЧАСТЬ 1 из 8 ===
 import os
 import re
 import json
@@ -20,6 +20,20 @@ import flet_audio_recorder as far
 
 STORAGE_DIR = os.getenv("FLET_APP_STORAGE_DATA") or tempfile.gettempdir()
 DB_PATH = os.path.join(STORAGE_DIR, "tutor_data.db")
+
+
+def _first(seq, default=None):
+    """Безопасное получение нулевого элемента списка/кортежа без скобок индекса."""
+    if not seq:
+        return default
+    return next(iter(seq), default)
+
+
+def _build_url(host_parts: list[str], path_parts: list[str], query: str = "") -> str:
+    """Сборка URL по частям, чтобы парсер чата не обрезал пути."""
+    host = ".".join(host_parts)
+    path = "/" + "/".join(path_parts) if path_parts else ""
+    return urllib.parse.urlunparse(("https", host, path, "", query, ""))
 
 
 def get_app_version() -> str:
@@ -50,8 +64,7 @@ def _clean_tuple_str(val: str) -> str:
     if s.startswith('("') and s.endswith('",)'):
         return s[2:-3]
     return s
-
-
+# === ЧАСТЬ 2 из 8 ===
 def init_db():
     os.makedirs(STORAGE_DIR, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
@@ -100,26 +113,27 @@ def init_db():
     cursor.execute("UPDATE settings SET value = 'Бесплатный (Google Speech)' WHERE key = 'stt_mode' AND value = 'Средствами телефона (Android)'")
 
     cursor.execute("SELECT value FROM settings WHERE key = 'api_key'")
-    old_row = cursor.fetchone()
-    if old_row and old_row:
+    old_val = _first(cursor.fetchone())
+    if old_val:
         cursor.execute("SELECT value FROM settings WHERE key = 'provider'")
-        prov_row = cursor.fetchone()
-        target_key = get_provider_key_name(prov_row if prov_row else "")
-        cursor.execute("UPDATE settings SET value = ? WHERE key = ? AND value = ''", (old_row, target_key))
+        prov_val = _first(cursor.fetchone(), "")
+        target_key = get_provider_key_name(prov_val)
+        cursor.execute("UPDATE settings SET value = ? WHERE key = ? AND value = ''", (old_val, target_key))
         cursor.execute("DELETE FROM settings WHERE key = 'api_key'")
 
     conn.commit()
     conn.close()
-# === ФРАГМЕНТ 2 из 6 ===
+
+
 def get_setting(key: str) -> str:
     if key == "api_key":
         key = get_provider_key_name(get_setting("provider"))
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("SELECT value FROM settings WHERE key = ?", (key,))
-    row = cursor.fetchone()
+    val = _first(cursor.fetchone())
     conn.close()
-    return _clean_tuple_str(str(row)) if row and row is not None else ""
+    return _clean_tuple_str(str(val)) if val is not None else ""
 
 
 def set_setting(key: str, value: str):
@@ -137,20 +151,19 @@ def get_ai_config() -> tuple[str, str, str]:
     api_key = get_setting(get_provider_key_name(provider)).strip()
 
     if provider == "ProxyAPI":
-        url = urllib.parse.urlunparse(("https", "api.proxyapi.ru/v1", "/openai", "", "", ""))
-        return url, api_key, "gpt-4o-mini"
+        url = _build_url(["api", "proxyapi", "ru"], ["v1"])
+        return url, api_key, "openai/gpt-5-mini"
     elif provider == "VseGPT":
-        url = urllib.parse.urlunparse(("https", "api.vsegpt.ru/v1", "", "", "", ""))
+        url = _build_url(["api", "vsegpt", "ru"], ["v1"])
         return url, api_key, "openai/gpt-4o-mini"
     else:
-        url = urllib.parse.urlunparse(("https", "openrouter.ai/api/v1", "", "", "", ""))
+        url = _build_url(["openrouter", "ai"], ["api", "v1"])
         return url, api_key, "openrouter/free"
-
-
+# === ЧАСТЬ 3 из 8 ===
 async def ask_llm(messages: list[dict], temperature: float = 0.7) -> str:
     base_url, api_key, model = get_ai_config()
     url = f"{base_url}/chat/completions"
-    referer_url = urllib.parse.urlunparse(("https", "github.com", "", "", "", ""))
+    referer_url = _build_url(["github", "com"], [])
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
@@ -161,17 +174,19 @@ async def ask_llm(messages: list[dict], temperature: float = 0.7) -> str:
     payload = {
         "model": model,
         "messages": messages,
-        "temperature": temperature
     }
+    if not model.startswith("openai/gpt-5"):
+        payload["temperature"] = temperature
 
-    async with httpx.AsyncClient(timeout=30.0, verify=False) as client:
+    async with httpx.AsyncClient(timeout=35.0, verify=False) as client:
         try:
             response = await client.post(url, headers=headers, json=payload)
             response.raise_for_status()
             data = response.json()
             if "error" in data:
                 raise RuntimeError(str(data["error"]))
-            return data["choices"]["message"]["content"].strip()
+            first_choice = _first(data.get("choices"), {})
+            return first_choice.get("message", {}).get("content", "").strip()
         except httpx.HTTPStatusError as e:
             err_body = e.response.text
             raise RuntimeError(f"Ошибка сервера {e.response.status_code} ({base_url}): {err_body[:200]}")
@@ -192,7 +207,7 @@ async def _recognize_google_free_wav(wav_path: str) -> str:
         "lang": "en-US",
         "key": "AIzaSyBOti4mM-6x9WDnZIjIeyEU21OpBXqQaGw",
     })
-    url = urllib.parse.urlunparse(("https", "://google.com", "/speech-api/v2/recognize", "", query, ""))
+    url = _build_url(["www", "google", "com"], ["speech-api", "v2", "recognize"], query=query)
     headers = {
         "Content-Type": f"audio/l16; rate={sample_rate};",
         "User-Agent": "Mozilla/5.0",
@@ -207,9 +222,11 @@ async def _recognize_google_free_wav(wav_path: str) -> str:
                 continue
             try:
                 obj = json.loads(line)
-                results = obj.get("result", [])
-                if results and results.get("alternative"):
-                    return results["alternative"].get("transcript", "").strip()
+                first_res = _first(obj.get("result"), {})
+                first_alt = _first(first_res.get("alternative"), {})
+                transcript = first_alt.get("transcript", "").strip()
+                if transcript:
+                    return transcript
             except Exception:
                 continue
     return ""
@@ -228,13 +245,14 @@ async def recognize_audio_async(file_path: str) -> str:
     base_url, api_key, _ = get_ai_config()
 
     if provider in ("ProxyAPI", "VseGPT") and api_key:
-        url = f"{base_url}/audio/transcriptions"
+        whisper_url = f"{base_url}/audio/transcriptions"
+        whisper_model = "openai/whisper-1" if provider == "ProxyAPI" else "whisper-1"
         headers = {"Authorization": f"Bearer {api_key}"}
         async with httpx.AsyncClient(timeout=30.0, verify=False) as client:
             with open(file_path, "rb") as audio_file:
                 files = {"file": (os.path.basename(file_path), audio_file, "audio/wav")}
-                data = {"model": "whisper-1", "language": "en"}
-                response = await client.post(url, headers=headers, data=data, files=files)
+                data = {"model": whisper_model, "language": "en"}
+                response = await client.post(whisper_url, headers=headers, data=data, files=files)
                 if response.status_code == 401:
                     raise RuntimeError("Неверный API-ключ для Whisper. Проверьте ключ в Настройках.")
                 if response.status_code >= 400:
@@ -243,7 +261,7 @@ async def recognize_audio_async(file_path: str) -> str:
                 return (res_json.get("text") or "").strip()
 
     raise RuntimeError("Для распознавания через ИИ нужен ключ ProxyAPI или VseGPT в Настройках.")
-# === ФРАГМЕНТ 3 из 6 ===
+# === ЧАСТЬ 4 из 8 ===
 async def get_tts_bytes_async(clean_text: str, use_ai: bool = False) -> bytes:
     normalized = " ".join(clean_text.split())[:400]
     base_url, api_key, _ = get_ai_config()
@@ -253,18 +271,19 @@ async def get_tts_bytes_async(clean_text: str, use_ai: bool = False) -> bytes:
     async with httpx.AsyncClient(timeout=20.0, verify=False) as client:
         if use_ai and provider in ("ProxyAPI", "VseGPT") and api_key:
             try:
-                url = f"{base_url}/audio/speech"
+                tts_url = f"{base_url}/audio/speech"
+                tts_model = "openai/tts-1" if provider == "ProxyAPI" else "tts-1"
                 headers = {
                     "Authorization": f"Bearer {api_key}",
                     "Content-Type": "application/json",
                 }
                 payload = {
-                    "model": "tts-1",
+                    "model": tts_model,
                     "input": normalized,
                     "voice": "nova",
                     "response_format": "mp3"
                 }
-                resp = await client.post(url, headers=headers, json=payload)
+                resp = await client.post(tts_url, headers=headers, json=payload)
                 if resp.status_code == 200 and len(resp.content) > 500:
                     return resp.content
                 last_err = f"TTS API ({resp.status_code}): {resp.text[:150]}"
@@ -272,22 +291,16 @@ async def get_tts_bytes_async(clean_text: str, use_ai: bool = False) -> bytes:
                 last_err = f"TTS API: {e}"
 
         free_urls = [
-            urllib.parse.urlunparse((
-                "https",
-                "://google.com",
-                "/translate_tts",
-                "",
+            _build_url(
+                ["translate", "google", "com"],
+                ["translate_tts"],
                 urllib.parse.urlencode({"ie": "UTF-8", "q": normalized[:200], "tl": "en", "client": "gtx"}),
-                "",
-            )),
-            urllib.parse.urlunparse((
-                "https",
-                "://streamelements.com",
-                "/kappa/v2/speech",
-                "",
+            ),
+            _build_url(
+                ["api", "streamelements", "com"],
+                ["kappa", "v2", "speech"],
                 urllib.parse.urlencode({"voice": "Brian", "text": normalized[:200]}),
-                "",
-            )),
+            ),
         ]
         for url in free_urls:
             try:
@@ -348,12 +361,11 @@ async def main(page: ft.Page):
             configuration=far.AudioRecorderConfiguration(
                 encoder=far.AudioEncoder.WAV,
                 sample_rate=16000,
-                num_channels=1,
             )
         )
         page.services.append(recorder)
         page.update()
-
+# === ЧАСТЬ 5 из 8 ===
         is_recording = False
         temp_audio_path = os.path.join(STORAGE_DIR, "temp_recording.wav")
 
@@ -362,7 +374,7 @@ async def main(page: ft.Page):
             icon_color=ft.Colors.BLUE_600,
             tooltip="Голосовой ввод (нажмите для старта, ещё раз — для остановки)",
         )
-# === ФРАГМЕНТ 4 из 6 ===
+
         async def mic_button_click(e):
             nonlocal is_recording
             if is_recording:
@@ -491,7 +503,7 @@ async def main(page: ft.Page):
             conn.close()
             show_snack(f"Сохранено: {word_clean} — {translation}", ft.Colors.GREEN_700)
             load_dictionary()
-# === ФРАГМЕНТ 5 из 6 ===
+# === ЧАСТЬ 6 из 8 ===
         def build_message_bubble(role: str, content: str):
             is_user = (role == "user")
             is_error = (role == "error")
@@ -613,7 +625,7 @@ async def main(page: ft.Page):
                 loading_indicator.visible = False
                 chat_list.controls.append(build_message_bubble("error", f"Ошибка ИИ: {ex}"))
                 page.update()
-# === ФРАГМЕНТ 6 из 7 ===
+# === ЧАСТЬ 7 из 8 ===
         def clear_chat(e):
             conn = sqlite3.connect(DB_PATH)
             cursor = conn.cursor()
@@ -729,7 +741,7 @@ async def main(page: ft.Page):
             spacing=0,
             visible=False
         )
-# === ФРАГМЕНТ 7 из 7 ===
+# === ЧАСТЬ 8 из 8 ===
         initial_provider = get_setting("provider") or "ProxyAPI"
 
         api_key_tf = ft.TextField(
