@@ -289,11 +289,16 @@ async def main(page: ft.Page):
         page.padding = 0
         page.bgcolor = "#F4F6F9"
 
-        def show_snack(msg: str, color: str = ft.Colors.BLUE_700):
-            sb = ft.SnackBar(ft.Text(msg, color=ft.Colors.WHITE), bgcolor=color)
+        def show_snack(msg: str, color: str = ft.Colors.BLUE_700, duration: int = 1500):
+            sb = ft.SnackBar(
+                ft.Text(msg, color=ft.Colors.WHITE),
+                bgcolor=color,
+                duration=duration,
+            )
             page.overlay.append(sb)
             sb.open = True
             page.update()
+
 
         chat_list = ft.ListView(expand=True, spacing=12, padding=15, auto_scroll=True)
 
@@ -363,7 +368,7 @@ async def main(page: ft.Page):
                     mic_button.icon = ft.Icons.STOP_CIRCLE_ROUNDED
                     mic_button.icon_color = ft.Colors.RED_400
                     page.update()
-                    show_snack("Идет запись... Нажмите красную кнопку для отправки.", ft.Colors.GREEN_700)
+                    show_snack("Идет запись... Нажмите красную кнопку для отправки.", ft.Colors.GREEN_700, duration=1000)
                 except Exception as ex:
                     is_recording = False
                     mic_button.icon = ft.Icons.MIC_ROUNDED
@@ -450,7 +455,7 @@ async def main(page: ft.Page):
                         style=ft.ButtonStyle(
                             padding=ft.Padding.symmetric(horizontal=10, vertical=4),
                             bgcolor=ft.Colors.AMBER_100,
-                            color=ft.Colors.BLACK87,
+                            color="#DD000000",
                         ),
                         on_click=lambda e, word=w: page.run_task(save_word_to_dict, word)
                     )
@@ -459,7 +464,7 @@ async def main(page: ft.Page):
             bubble_controls = [
                 ft.Text(
                     content.replace("**", ""),
-                    color=ft.Colors.WHITE if (is_user or is_error) else ft.Colors.BLACK87,
+                    color=ft.Colors.WHITE if (is_user or is_error) else "#DD000000",
                     size=15,
                     selectable=True
                 )
@@ -492,11 +497,12 @@ async def main(page: ft.Page):
                         padding=14,
                         border_radius=16,
                         width=page.width * 0.82 if page.width else 300,
-                        shadow=ft.BoxShadow(blur_radius=4, color=ft.Colors.BLACK12)
+                        shadow=ft.BoxShadow(blur_radius=4, color="#1F000000")
                     )
                 ],
                 alignment=ft.MainAxisAlignment.END if is_user else ft.MainAxisAlignment.START
             )
+
 ###########
 
         def load_chat_history():
