@@ -1,4 +1,4 @@
-# === ФРАГМЕНТ 1 из 7 ===
+# === ФРАГМЕНТ 1 из 8 ===
 import os
 import re
 import json
@@ -17,6 +17,11 @@ import httpx
 import flet as ft
 import flet_audio as fta
 import flet_audio_recorder as far
+
+try:
+    import speech_recognition as sr
+except ImportError:
+    sr = None
 
 try:
     from jnius import autoclass, PythonJavaClass, java_method
@@ -92,13 +97,12 @@ def init_db():
         "level": "A1-A2 (Начальный)",
         "topic": "Путешествия и кафе",
         "auto_tts": "0",
-        "tts_mode": "Бесплатный голос (Android TTS)",
-        "stt_mode": "Средствами телефона (Android)"
+        "tts_mode": "Бесплатный голос (Google TTS)",
+        "stt_mode": "ИИ (Whisper API)"
     }
     for k, v in defaults.items():
         cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (k, v))
 
-    # Автоочистка значений, сохраненных ранее со скобками кортежа ('...',)
     cursor.execute("SELECT key, value FROM settings")
     for k, v in cursor.fetchall():
         cleaned = _clean_tuple_str(str(v))
@@ -117,7 +121,7 @@ def init_db():
     conn.commit()
     conn.close()
 
-# === ФРАГМЕНТ 2 из 7 ===
+# === ФРАГМЕНТ 2 из 8 ===
 def get_setting(key: str) -> str:
     if key == "api_key":
         key = get_provider_key_name(get_setting("provider"))
@@ -201,10 +205,10 @@ def _get_android_activity():
         pass
     return None
 
-# === ФРАГМЕНТ 3 из 7 ===
+# === ФРАГМЕНТ 3 из 8 ===
 def _sync_android_stt() -> str:
     if autoclass is None:
-        raise RuntimeError("Распознавание средствами телефона доступно только в APK на Android.")
+        raise RuntimeError("Нативный Android STT недоступен в этой сборке. Используйте «ИИ (Whisper API)» или микрофон на клавиатуре.")
     try:
         Intent = autoclass("android.content.Intent")
         RecognizerIntent = autoclass("android.speech.RecognizerIntent")
@@ -217,7 +221,7 @@ def _sync_android_stt() -> str:
             raise RuntimeError("Не удалось получить контекст Android.")
 
         if not SpeechRecognizer.isRecognitionAvailable(context):
-            raise RuntimeError("На телефоне не установлен сервис распознавания речи Google (приложение Google).")
+            raise RuntimeError("На телефоне не установлен сервис распознавания речи Google.")
 
         result_holder = {"text": "", "error": None}
         done_event = threading.Event()
@@ -288,14 +292,14 @@ def _sync_android_stt() -> str:
             @java_method("()V")
             def run(self):
                 try:
-                    sr = SpeechRecognizer.createSpeechRecognizer(context)
+                    sr_engine = SpeechRecognizer.createSpeechRecognizer(context)
                     listener = RecognitionListener()
-                    sr.setRecognitionListener(listener)
+                    sr_engine.setRecognitionListener(listener)
                     intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
                     intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
                     intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE, "en-US")
                     intent.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
-                    sr.startListening(intent)
+                    sr_engine.startListening(intent)
                 except Exception as ex:
                     result_holder["error"] = str(ex)
                     done_event.set()
@@ -312,7 +316,7 @@ def _sync_android_stt() -> str:
 
 
 async def recognize_audio_async(file_path: str) -> str:
-    stt_mode = get_setting("stt_mode").strip() or "Средствами телефона (Android)"
+    stt_mode = get_setting("stt_mode").strip() or "ИИ (Whisper API)"
 
     if stt_mode == "Средствами телефона (Android)":
         return await asyncio.to_thread(_sync_android_stt)
@@ -324,8 +328,7 @@ async def recognize_audio_async(file_path: str) -> str:
     base_url, api_key, _ = get_ai_config()
 
     if provider in ("ProxyAPI", "VseGPT") and api_key:
-        whisper_base = "https://proxyapi.ru" if provider == "ProxyAPI" else base_url
-        url = f"{whisper_base}/audio/transcriptions"
+        url = f"{base_url}/audio/transcriptions"
         headers = {"Authorization": f"Bearer {api_key}"}
         async with httpx.AsyncClient(timeout=30.0, verify=False) as client:
             with open(file_path, "rb") as audio_file:
@@ -333,25 +336,25 @@ async def recognize_audio_async(file_path: str) -> str:
                 data = {"model": "whisper-1", "language": "en"}
                 response = await client.post(url, headers=headers, data=data, files=files)
                 if response.status_code == 401:
-                    raise RuntimeError("Неверный API-ключ для Whisper. Проверьте ключ в Настройках или переключитесь на распознавание телефоном.")
-                response.raise_for_status()
+                    raise RuntimeError("Неверный API-ключ для Whisper. Проверьте ключ в Настройках.")
+                if response.status_code >= 400:
+                    raise RuntimeError(f"Ошибка Whisper ({response.status_code}): {response.text[:180]}")
                 res_json = response.json()
                 return (res_json.get("text") or "").strip()
 
-    raise RuntimeError("Для распознавания через ИИ нужен ключ ProxyAPI или VseGPT. Переключите режим микрофона на «Средствами телефона (Android)» в Настройках.")
+    raise RuntimeError("Для распознавания через ИИ нужен ключ ProxyAPI или VseGPT в Настройках.")
 
-# === ФРАГМЕНТ 4 из 7 ===
-async def get_tts_base64_async(clean_text: str) -> str:
+# === ФРАГМЕНТ 4 из 8 ===
+async def get_tts_bytes_async(clean_text: str, use_ai: bool = False) -> bytes:
     normalized = " ".join(clean_text.split())[:400]
     base_url, api_key, _ = get_ai_config()
     provider = get_setting("provider").strip()
     last_err = "Нет доступного сервиса озвучки"
 
     async with httpx.AsyncClient(timeout=20.0, verify=False) as client:
-        if provider in ("ProxyAPI", "VseGPT") and api_key:
+        if use_ai and provider in ("ProxyAPI", "VseGPT") and api_key:
             try:
-                tts_base = "https://proxyapi.ru" if provider == "ProxyAPI" else base_url
-                url = f"{tts_base}/audio/speech"
+                url = f"{base_url}/audio/speech"
                 headers = {
                     "Authorization": f"Bearer {api_key}",
                     "Content-Type": "application/json",
@@ -363,21 +366,36 @@ async def get_tts_base64_async(clean_text: str) -> str:
                     "response_format": "mp3"
                 }
                 resp = await client.post(url, headers=headers, json=payload)
-                resp.raise_for_status()
-                if len(resp.content) > 500:
-                    return base64.b64encode(resp.content).decode("utf-8")
+                if resp.status_code == 200 and len(resp.content) > 500:
+                    return resp.content
+                last_err = f"TTS API ({resp.status_code}): {resp.text[:150]}"
             except Exception as e:
                 last_err = f"TTS API: {e}"
 
         free_urls = [
-            f"https://streamelements.com?{urllib.parse.urlencode({'voice': 'Brian', 'text': normalized[:200]})}",
-            f"https://google.com?{urllib.parse.urlencode({'ie': 'UTF-8', 'q': normalized[:200], 'tl': 'en', 'client': 'gtx'})}"
+            urllib.parse.urlunparse((
+                "https",
+                "translate.google.com",
+                "/translate_tts",
+                "",
+                urllib.parse.urlencode({"ie": "UTF-8", "q": normalized[:200], "tl": "en", "client": "gtx"}),
+                "",
+            )),
+            urllib.parse.urlunparse((
+                "https",
+                "api.streamelements.com",
+                "/kappa/v2/speech",
+                "",
+                urllib.parse.urlencode({"voice": "Brian", "text": normalized[:200]}),
+                "",
+            )),
         ]
+
         for url in free_urls:
             try:
                 resp = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
                 if resp.status_code == 200 and len(resp.content) > 500 and not resp.content.lstrip().startswith(b"<"):
-                    return base64.b64encode(resp.content).decode("utf-8")
+                    return resp.content
             except Exception as e:
                 last_err = str(e)
 
@@ -419,20 +437,6 @@ def _sync_android_tts(text: str) -> None:
         raise RuntimeError(f"Ошибка Android TTS: {e}")
 
 
-def _play_mp3_android_native(file_path: str) -> bool:
-    if autoclass is None:
-        return False
-    try:
-        MediaPlayer = autoclass("android.media.MediaPlayer")
-        mp = MediaPlayer()
-        mp.setDataSource(file_path)
-        mp.prepare()
-        mp.start()
-        return True
-    except Exception:
-        return False
-
-
 def build_system_prompt() -> str:
     level = get_setting("level")
     topic = get_setting("topic")
@@ -455,7 +459,7 @@ def extract_english_part(text: str) -> str:
     cleaned = cleaned.replace("**", "").strip()
     return cleaned
 
-# === ФРАГМЕНТ 5 из 7 ===
+# === ФРАГМЕНТ 5 из 8 ===
 async def main(page: ft.Page):
     try:
         init_db()
@@ -482,8 +486,7 @@ async def main(page: ft.Page):
                 encoder=far.AudioEncoder.AACLC
             )
         )
-        audio_player = fta.Audio(autoplay=True, playback_rate=0.85)
-        page.services.extend([recorder, audio_player])
+        page.services.append(recorder)
         page.update()
 
         is_recording = False
@@ -497,7 +500,7 @@ async def main(page: ft.Page):
 
         async def mic_button_click(e):
             nonlocal is_recording
-            stt_mode = get_setting("stt_mode").strip() or "Средствами телефона (Android)"
+            stt_mode = get_setting("stt_mode").strip() or "ИИ (Whisper API)"
 
             if stt_mode == "Средствами телефона (Android)":
                 try:
@@ -555,7 +558,8 @@ async def main(page: ft.Page):
                     mic_button.icon = ft.Icons.MIC_ROUNDED
                     mic_button.icon_color = ft.Colors.BLUE_600
                     page.update()
-                    show_snack(f"Ошибка распознавания: {ex}", ft.Colors.RED_600, duration=2000)
+                    chat_list.controls.append(build_message_bubble("error", f"🎤 Ошибка распознавания: {ex}"))
+                    page.update()
             else:
                 try:
                     has_perm = await recorder.has_permission()
@@ -575,25 +579,25 @@ async def main(page: ft.Page):
                     mic_button.icon = ft.Icons.STOP_CIRCLE_ROUNDED
                     mic_button.icon_color = ft.Colors.RED_400
                     page.update()
-                    show_snack("Идет запись... Нажмите красную кнопку для отправки.", ft.Colors.GREEN_700, duration=500)
+                    show_snack("Идет запись... Нажмите красную кнопку для отправки.", ft.Colors.GREEN_700, duration=800)
                 except Exception as ex:
                     is_recording = False
                     mic_button.icon = ft.Icons.MIC_ROUNDED
                     mic_button.icon_color = ft.Colors.BLUE_600
                     page.update()
-                    show_snack(f"Ошибка микрофона: {ex}", ft.Colors.RED_600, duration=1000)
+                    show_snack(f"Ошибка микрофона: {ex}", ft.Colors.RED_600, duration=2000)
 
         mic_button.on_click = lambda e: page.run_task(mic_button_click, e)
 
-# === ФРАГМЕНТ 6 из 7 ===
+# === ФРАГМЕНТ 6 из 8 ===
         async def speak_text(english_text: str):
             clean_text = extract_english_part(english_text)
             if not clean_text:
                 return
 
-            tts_mode = get_setting("tts_mode").strip() or "Бесплатный голос (Android TTS)"
+            tts_mode = get_setting("tts_mode").strip() or "Бесплатный голос (Google TTS)"
 
-            if tts_mode == "Бесплатный голос (Android TTS)":
+            if tts_mode == "Голос телефона (Android TTS)":
                 try:
                     await asyncio.to_thread(_sync_android_tts, clean_text)
                 except Exception as e:
@@ -602,10 +606,12 @@ async def main(page: ft.Page):
                 return
 
             try:
-                b64_audio = await get_tts_base64_async(clean_text)
+                use_ai = (tts_mode == "Голос ИИ (OpenAI TTS)")
+                audio_bytes = await get_tts_bytes_async(clean_text, use_ai=use_ai)
+
                 tts_path = os.path.join(STORAGE_DIR, f"tts_{int(time.time() * 1000)}.mp3")
                 with open(tts_path, "wb") as f:
-                    f.write(base64.b64decode(b64_audio))
+                    f.write(audio_bytes)
 
                 for fname in os.listdir(STORAGE_DIR):
                     if fname.startswith("tts_") and fname.endswith(".mp3") and os.path.join(STORAGE_DIR, fname) != tts_path:
@@ -614,12 +620,13 @@ async def main(page: ft.Page):
                         except Exception:
                             pass
 
-                played_native = await asyncio.to_thread(_play_mp3_android_native, tts_path)
-                if not played_native:
-                    audio_player.src = f"file://{tts_path}"
-                    audio_player.autoplay = True
-                    audio_player.playback_rate = 0.85
-                    page.update()
+                for item in list(page.services):
+                    if isinstance(item, fta.Audio):
+                        page.services.remove(item)
+
+                player = fta.Audio(src=tts_path, autoplay=True, playback_rate=0.9)
+                page.services.append(player)
+                page.update()
             except Exception as e:
                 chat_list.controls.append(
                     build_message_bubble("error", f"🔊 Ошибка озвучки: {e}")
@@ -732,7 +739,7 @@ async def main(page: ft.Page):
             for r, c in rows:
                 chat_list.controls.append(build_message_bubble(r, c))
 
-# === ФРАГМЕНТ 8 (часть 1 из бывшего 7-го) ===
+# === ФРАГМЕНТ 7 из 8 ===
         async def send_message():
             text = (user_input.value or "").strip()
             if not text:
@@ -899,7 +906,7 @@ async def main(page: ft.Page):
             visible=False
         )
 
-# === ФРАГМЕНТ 9 (часть 2 из бывшего 7-го) ===
+# === ФРАГМЕНТ 8 из 8 ===
         initial_provider = get_setting("provider") or "ProxyAPI"
 
         api_key_tf = ft.TextField(
@@ -946,19 +953,20 @@ async def main(page: ft.Page):
 
         tts_mode_dd = ft.Dropdown(
             label="Тип озвучки учителя",
-            value=get_setting("tts_mode") or "Бесплатный голос (Android TTS)",
+            value=get_setting("tts_mode") or "Бесплатный голос (Google TTS)",
             options=[
-                ft.dropdown.Option("Бесплатный голос (Android TTS)"),
+                ft.dropdown.Option("Бесплатный голос (Google TTS)"),
                 ft.dropdown.Option("Голос ИИ (OpenAI TTS)"),
+                ft.dropdown.Option("Голос телефона (Android TTS)"),
             ]
         )
 
         stt_mode_dd = ft.Dropdown(
             label="Распознавание голоса (микрофон)",
-            value=get_setting("stt_mode") or "Средствами телефона (Android)",
+            value=get_setting("stt_mode") or "ИИ (Whisper API)",
             options=[
-                ft.dropdown.Option("Средствами телефона (Android)"),
                 ft.dropdown.Option("ИИ (Whisper API)"),
+                ft.dropdown.Option("Средствами телефона (Android)"),
             ]
         )
 
@@ -976,8 +984,8 @@ async def main(page: ft.Page):
                 set_setting(get_provider_key_name(selected_provider), api_key_tf.value or "")
                 set_setting("level", level_dd.value or "A1-A2 (Начальный)")
                 set_setting("topic", topic_tf.value or "Путешествия и кафе")
-                set_setting("tts_mode", tts_mode_dd.value or "Бесплатный голос (Android TTS)")
-                set_setting("stt_mode", stt_mode_dd.value or "Средствами телефона (Android)")
+                set_setting("tts_mode", tts_mode_dd.value or "Бесплатный голос (Google TTS)")
+                set_setting("stt_mode", stt_mode_dd.value or "ИИ (Whisper API)")
                 set_setting("auto_tts", "1" if auto_tts_sw.value else "0")
                 save_status_text.value = f"✅ Настройки и ключ для {selected_provider} сохранены!"
                 save_status_text.color = ft.Colors.GREEN_700
