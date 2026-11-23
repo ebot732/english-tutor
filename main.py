@@ -1,10 +1,12 @@
 import os
 import re
 import json
+import time
 import base64
 import sqlite3
 import tempfile
 import asyncio
+import threading
 import traceback
 import urllib.request
 import urllib.parse
@@ -16,14 +18,12 @@ import flet_audio as fta
 import flet_audio_recorder as far
 
 try:
-    import speech_recognition as sr
-except ImportError:
-    sr = None
-
-try:
-    from jnius import autoclass
+    from jnius import autoclass, PythonJavaClass, java_method
 except ImportError:
     autoclass = None
+    PythonJavaClass = object
+    def java_method(*args, **kwargs):
+        return lambda f: f
 
 STORAGE_DIR = os.getenv("FLET_APP_STORAGE_DATA") or tempfile.gettempdir()
 DB_PATH = os.path.join(STORAGE_DIR, "tutor_data.db")
@@ -81,24 +81,25 @@ def init_db():
         "api_key_vsegpt": "",
         "level": "A1-A2 (Начальный)",
         "topic": "Путешествия и кафе",
-        "auto_tts": "1",
-        "tts_mode": "Голос ИИ (OpenAI TTS)"
+        "auto_tts": "0",
+        "tts_mode": "Бесплатный голос (Android TTS)",
+        "stt_mode": "Средствами телефона (Android)"
     }
     for k, v in defaults.items():
         cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (k, v))
-
+##############2222
     cursor.execute("SELECT value FROM settings WHERE key = 'api_key'")
     old_row = cursor.fetchone()
-    if old_row and old_row[0]:
+    if old_row and old_row:
         cursor.execute("SELECT value FROM settings WHERE key = 'provider'")
         prov_row = cursor.fetchone()
-        target_key = get_provider_key_name(prov_row[0] if prov_row else "")
-        cursor.execute("UPDATE settings SET value = ? WHERE key = ? AND value = ''", (old_row[0], target_key))
+        target_key = get_provider_key_name(prov_row if prov_row else "")
+        cursor.execute("UPDATE settings SET value = ? WHERE key = ? AND value = ''", (old_row, target_key))
         cursor.execute("DELETE FROM settings WHERE key = 'api_key'")
 
     conn.commit()
     conn.close()
-####
+
 
 def get_setting(key: str) -> str:
     if key == "api_key":
@@ -108,8 +109,7 @@ def get_setting(key: str) -> str:
     cursor.execute("SELECT value FROM settings WHERE key = ?", (key,))
     row = cursor.fetchone()
     conn.close()
-    return str(row[0]) if row and row[0] is not None else ""
-
+    return str(row) if row and row is not None else ""
 
 
 def set_setting(key: str, value: str):
@@ -132,6 +132,7 @@ def get_ai_config() -> tuple[str, str, str]:
         return "https://api.vsegpt.ru/v1", api_key, "openai/gpt-4o-mini"
     else:
         return "https://openrouter.ai/api/v1", api_key, "openrouter/free"
+
 
 async def ask_llm(messages: list[dict], temperature: float = 0.7) -> str:
     base_url, api_key, model = get_ai_config()
@@ -156,16 +157,85 @@ async def ask_llm(messages: list[dict], temperature: float = 0.7) -> str:
             data = response.json()
             if "error" in data:
                 raise RuntimeError(str(data["error"]))
-            return data["choices"][0]["message"]["content"].strip()
+            return data["choices"]["message"]["content"].strip()
         except httpx.HTTPStatusError as e:
             err_body = e.response.text
             raise RuntimeError(f"Ошибка сервера {e.response.status_code} ({base_url}): {err_body[:200]}")
         except httpx.RequestError as e:
             raise RuntimeError(f"Ошибка сети ({base_url}): {e}")
+############33333333333
+def _get_android_activity():
+    if autoclass is None:
+        return None
+    for cls_name in ("org.kivy.android.PythonActivity", "com.flet.app.MainActivity"):
+        try:
+            cls = autoclass(cls_name)
+            if hasattr(cls, "mActivity") and cls.mActivity is not None:
+                return cls.mActivity
+        except Exception:
+            pass
+    try:
+        ActivityThread = autoclass("android.app.ActivityThread")
+        return ActivityThread.currentApplication()
+    except Exception:
+        return None
 
+
+def _sync_android_stt() -> str:
+    if autoclass is None:
+        raise RuntimeError("Распознавание средствами телефона доступно только в APK на Android.")
+    try:
+        Intent = autoclass("android.content.Intent")
+        RecognizerIntent = autoclass("android.speech.RecognizerIntent")
+        PythonActivity = autoclass("org.kivy.android.PythonActivity")
+        activity = PythonActivity.mActivity
+
+        intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+        intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+        intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE, "en-US")
+        intent.putExtra(RecognizerIntent.EXTRA_PROMPT, "Speak in English...")
+
+        pm = activity.getPackageManager()
+        if intent.resolveActivity(pm) is None:
+            raise RuntimeError("На телефоне не установлен сервис распознавания речи Google.")
+
+        result_holder = {"text": "", "error": None}
+        done_event = threading.Event()
+
+        from android import activity as android_activity
+        REQ_CODE = 9042
+
+        def on_activity_result(request_code, result_code, data):
+            if request_code != REQ_CODE:
+                return
+            android_activity.unbind(on_activity_result=on_activity_result)
+            try:
+                if result_code == -1 and data is not None:
+                    matches = data.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
+                    if matches and matches.size() > 0:
+                        result_holder["text"] = str(matches.get(0))
+            except Exception as ex:
+                result_holder["error"] = str(ex)
+            finally:
+                done_event.set()
+
+        android_activity.bind(on_activity_result=on_activity_result)
+        activity.startActivityForResult(intent, REQ_CODE)
+        done_event.wait(timeout=30.0)
+
+        if result_holder["error"]:
+            raise RuntimeError(result_holder["error"])
+        return result_holder["text"].strip()
+    except Exception as e:
+        raise RuntimeError(f"Ошибка распознавания телефона: {e}")
 
 
 async def recognize_audio_async(file_path: str) -> str:
+    stt_mode = get_setting("stt_mode").strip() or "Средствами телефона (Android)"
+
+    if stt_mode == "Средствами телефона (Android)":
+        return await asyncio.to_thread(_sync_android_stt)
+
     if not os.path.exists(file_path) or os.path.getsize(file_path) < 100:
         raise RuntimeError("Файл записи пуст или не создан")
 
@@ -174,39 +244,28 @@ async def recognize_audio_async(file_path: str) -> str:
 
     if provider in ("ProxyAPI", "VseGPT") and api_key:
         url = f"{base_url}/audio/transcriptions"
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-        }
+        headers = {"Authorization": f"Bearer {api_key}"}
         async with httpx.AsyncClient(timeout=30.0, verify=False) as client:
             with open(file_path, "rb") as audio_file:
                 files = {"file": (os.path.basename(file_path), audio_file, "audio/mp4")}
                 data = {"model": "whisper-1", "language": "en"}
                 response = await client.post(url, headers=headers, data=data, files=files)
+                if response.status_code == 401:
+                    raise RuntimeError("Неверный API-ключ для Whisper. Проверьте ключ в Настройках или переключитесь на распознавание телефоном.")
                 response.raise_for_status()
                 res_json = response.json()
                 return (res_json.get("text") or "").strip()
 
-    if sr is None:
-        raise RuntimeError("Модуль SpeechRecognition не установлен")
-
-    def _sync_sr():
-        r = sr.Recognizer()
-        with sr.AudioFile(file_path) as source:
-            audio = r.record(source)
-        return r.recognize_google(audio, language="en-US")
-
-    return await asyncio.to_thread(_sync_sr)
-
-
+    raise RuntimeError("Для распознавания через ИИ нужен ключ ProxyAPI или VseGPT. Переключите режим микрофона на «Средствами телефона (Android)» в Настройках.")
+###########44444444444444
 async def get_tts_base64_async(clean_text: str) -> str:
     normalized = " ".join(clean_text.split())[:400]
     base_url, api_key, _ = get_ai_config()
     provider = get_setting("provider").strip()
-    tts_mode = get_setting("tts_mode").strip() or "Голос ИИ (OpenAI TTS)"
     last_err = "Нет доступного сервиса озвучки"
 
     async with httpx.AsyncClient(timeout=20.0, verify=False) as client:
-        if tts_mode == "Голос ИИ (OpenAI TTS)" and provider in ("ProxyAPI", "VseGPT") and api_key:
+        if provider in ("ProxyAPI", "VseGPT") and api_key:
             try:
                 url = f"{base_url}/audio/speech"
                 headers = {
@@ -241,20 +300,53 @@ async def get_tts_base64_async(clean_text: str) -> str:
     raise RuntimeError(last_err)
 
 
-def _sync_android_tts(text: str) -> None:
-    if autoclass is None:
-        raise RuntimeError("pyjnius не установлен. Выберите «Голос ИИ (OpenAI TTS)» в настройках.")
-    try:
-        TextToSpeech = autoclass('android.speech.tts.TextToSpeech')
-        PythonActivity = autoclass('org.kivy.android.PythonActivity')
-        Locale = autoclass('java.util.Locale')
+_android_tts_instance = None
+_android_tts_ready = threading.Event()
 
-        context = PythonActivity.mActivity
-        tts = TextToSpeech(context, None)
-        tts.setLanguage(Locale.US)
-        tts.speak(text, 0, None, "utterance_id")
+
+def _sync_android_tts(text: str) -> None:
+    global _android_tts_instance
+    if autoclass is None:
+        raise RuntimeError("Озвучка телефоном доступна только в APK на Android.")
+    try:
+        TextToSpeech = autoclass("android.speech.tts.TextToSpeech")
+        Locale = autoclass("java.util.Locale")
+        context = _get_android_activity()
+        if context is None:
+            raise RuntimeError("Не удалось получить контекст Android.")
+
+        if _android_tts_instance is None:
+            class TTSInitListener(PythonJavaClass):
+                __javainterfaces__ = ["android/speech/tts/TextToSpeech$OnInitListener"]
+                __javacontext__ = "app"
+
+                @java_method("(I)V")
+                def onInit(self, status):
+                    _android_tts_ready.set()
+
+            listener = TTSInitListener()
+            _android_tts_instance = TextToSpeech(context, listener)
+            _android_tts_ready.wait(timeout=3.0)
+
+        _android_tts_instance.setLanguage(Locale.US)
+        _android_tts_instance.setSpeechRate(0.9)
+        _android_tts_instance.speak(text, 0, None, f"utt_{int(time.time() * 1000)}")
     except Exception as e:
         raise RuntimeError(f"Ошибка Android TTS: {e}")
+
+
+def _play_mp3_android_native(file_path: str) -> bool:
+    if autoclass is None:
+        return False
+    try:
+        MediaPlayer = autoclass("android.media.MediaPlayer")
+        mp = MediaPlayer()
+        mp.setDataSource(file_path)
+        mp.prepare()
+        mp.start()
+        return True
+    except Exception:
+        return False
 
 
 def build_system_prompt() -> str:
@@ -278,8 +370,7 @@ def extract_english_part(text: str) -> str:
     cleaned = re.sub(r'\(.*?\)', '', text, flags=re.DOTALL)
     cleaned = cleaned.replace("**", "").strip()
     return cleaned
-#########
-
+#############555555555555
 async def main(page: ft.Page):
     try:
         init_db()
@@ -289,7 +380,7 @@ async def main(page: ft.Page):
         page.padding = 0
         page.bgcolor = "#F4F6F9"
 
-        def show_snack(msg: str, color: str = ft.Colors.BLUE_700, duration: int = 1500):
+        def show_snack(msg: str, color: str = ft.Colors.BLUE_700, duration: int = 3000):
             sb = ft.SnackBar(
                 ft.Text(msg, color=ft.Colors.WHITE),
                 bgcolor=color,
@@ -298,7 +389,6 @@ async def main(page: ft.Page):
             page.overlay.append(sb)
             sb.open = True
             page.update()
-
 
         chat_list = ft.ListView(expand=True, spacing=12, padding=15, auto_scroll=True)
 
@@ -311,19 +401,32 @@ async def main(page: ft.Page):
         page.services.extend([recorder, audio_player])
         page.update()
 
-        
-
         is_recording = False
         temp_audio_path = os.path.join(STORAGE_DIR, "temp_recording.m4a")
 
         mic_button = ft.IconButton(
             icon=ft.Icons.MIC_ROUNDED,
             icon_color=ft.Colors.BLUE_600,
-            tooltip="Голосовой ввод (нажмите для старта, ещё раз — для остановки)",
+            tooltip="Голосовой ввод",
         )
 
         async def mic_button_click(e):
             nonlocal is_recording
+            stt_mode = get_setting("stt_mode").strip() or "Средствами телефона (Android)"
+
+            if stt_mode == "Средствами телефона (Android)":
+                try:
+                    text = await recognize_audio_async("")
+                    if text:
+                        user_input.value = text
+                        page.update()
+                        await send_message()
+                    else:
+                        show_snack("Речь не распознана.", ft.Colors.ORANGE_700, duration=1500)
+                except Exception as ex:
+                    show_snack(str(ex), ft.Colors.RED_600, duration=3000)
+                return
+
             if is_recording:
                 try:
                     recorded_path = await recorder.stop_recording()
@@ -332,7 +435,7 @@ async def main(page: ft.Page):
                     mic_button.icon_color = ft.Colors.BLUE_600
                     loading_indicator.visible = True
                     page.update()
-                    show_snack("Распознаю речь...", ft.Colors.BLUE_700)
+                    show_snack("Распознаю речь...", ft.Colors.BLUE_700, duration=1500)
 
                     actual_path = recorded_path if (recorded_path and os.path.exists(recorded_path)) else temp_audio_path
                     text = await recognize_audio_async(actual_path)
@@ -344,19 +447,19 @@ async def main(page: ft.Page):
                         await send_message()
                     else:
                         page.update()
-                        show_snack("Речь не распознана. Попробуйте говорить четче.", ft.Colors.ORANGE_700)
+                        show_snack("Речь не распознана. Попробуйте говорить четче.", ft.Colors.ORANGE_700, duration=1500)
                 except Exception as ex:
                     is_recording = False
                     loading_indicator.visible = False
                     mic_button.icon = ft.Icons.MIC_ROUNDED
                     mic_button.icon_color = ft.Colors.BLUE_600
                     page.update()
-                    show_snack(f"Ошибка распознавания: {ex}", ft.Colors.RED_600)
+                    show_snack(f"Ошибка распознавания: {ex}", ft.Colors.RED_600, duration=2000)
             else:
                 try:
                     has_perm = await recorder.has_permission()
                     if not has_perm:
-                        show_snack("Выдайте разрешение на микрофон и нажмите кнопку снова", ft.Colors.ORANGE_700)
+                        show_snack("Выдайте разрешение на микрофон и нажмите кнопку снова", ft.Colors.ORANGE_700, duration=2000)
                         return
 
                     if os.path.exists(temp_audio_path):
@@ -371,22 +474,22 @@ async def main(page: ft.Page):
                     mic_button.icon = ft.Icons.STOP_CIRCLE_ROUNDED
                     mic_button.icon_color = ft.Colors.RED_400
                     page.update()
-                    show_snack("Идет запись... Нажмите красную кнопку для отправки.", ft.Colors.GREEN_700, duration=1000)
+                    show_snack("Идет запись... Нажмите красную кнопку для отправки.", ft.Colors.GREEN_700, duration=500)
                 except Exception as ex:
                     is_recording = False
                     mic_button.icon = ft.Icons.MIC_ROUNDED
                     mic_button.icon_color = ft.Colors.BLUE_600
                     page.update()
-                    show_snack(f"Ошибка микрофона: {ex}", ft.Colors.RED_600)
+                    show_snack(f"Ошибка микрофона: {ex}", ft.Colors.RED_600, duration=1000)
 
         mic_button.on_click = lambda e: page.run_task(mic_button_click, e)
-
+################666666666666
         async def speak_text(english_text: str):
             clean_text = extract_english_part(english_text)
             if not clean_text:
                 return
 
-            tts_mode = get_setting("tts_mode").strip()
+            tts_mode = get_setting("tts_mode").strip() or "Бесплатный голос (Android TTS)"
 
             if tts_mode == "Бесплатный голос (Android TTS)":
                 try:
@@ -398,21 +501,28 @@ async def main(page: ft.Page):
 
             try:
                 b64_audio = await get_tts_base64_async(clean_text)
-                tts_path = os.path.join(STORAGE_DIR, "tts_reply.mp3")
+                tts_path = os.path.join(STORAGE_DIR, f"tts_{int(time.time() * 1000)}.mp3")
                 with open(tts_path, "wb") as f:
                     f.write(base64.b64decode(b64_audio))
 
-                audio_player.src = tts_path
-                audio_player.autoplay = True
-                audio_player.playback_rate = 0.85
-                audio_player.update()
-                await audio_player.play()
+                for fname in os.listdir(STORAGE_DIR):
+                    if fname.startswith("tts_") and fname.endswith(".mp3") and os.path.join(STORAGE_DIR, fname) != tts_path:
+                        try:
+                            os.remove(os.path.join(STORAGE_DIR, fname))
+                        except Exception:
+                            pass
+
+                played_native = await asyncio.to_thread(_play_mp3_android_native, tts_path)
+                if not played_native:
+                    audio_player.src = f"file://{tts_path}"
+                    audio_player.autoplay = True
+                    audio_player.playback_rate = 0.85
+                    page.update()
             except Exception as e:
                 chat_list.controls.append(
                     build_message_bubble("error", f"🔊 Ошибка озвучки: {e}")
                 )
                 page.update()
-
 
         user_input = ft.TextField(
             hint_text="Напишите или надиктуйте на EN...",
@@ -509,9 +619,7 @@ async def main(page: ft.Page):
                 ],
                 alignment=ft.MainAxisAlignment.END if is_user else ft.MainAxisAlignment.START
             )
-
-###########
-
+##########777777777777777
         def load_chat_history():
             chat_list.controls.clear()
             conn = sqlite3.connect(DB_PATH)
@@ -567,7 +675,6 @@ async def main(page: ft.Page):
                     await asyncio.sleep(0.1)
                     await speak_text(ai_reply)
 
-
             except Exception as ex:
                 loading_indicator.visible = False
                 chat_list.controls.append(build_message_bubble("error", f"Ошибка ИИ: {ex}"))
@@ -622,7 +729,7 @@ async def main(page: ft.Page):
             expand=True,
             spacing=0
         )
-
+##############8888888888
         dict_list = ft.ListView(expand=True, spacing=8, padding=15)
 
         def delete_word(word_id: int):
@@ -688,7 +795,6 @@ async def main(page: ft.Page):
             spacing=0,
             visible=False
         )
-########
 
         initial_provider = get_setting("provider") or "ProxyAPI"
 
@@ -733,13 +839,22 @@ async def main(page: ft.Page):
             value=get_setting("topic") or "Путешествия и кафе",
             hint_text="Например: Заказ еды, Собеседование, Хобби"
         )
-
+##########################9999999999
         tts_mode_dd = ft.Dropdown(
             label="Тип озвучки учителя",
-            value=get_setting("tts_mode") or "Голос ИИ (OpenAI TTS)",
+            value=get_setting("tts_mode") or "Бесплатный голос (Android TTS)",
             options=[
-                ft.dropdown.Option("Голос ИИ (OpenAI TTS)"),
                 ft.dropdown.Option("Бесплатный голос (Android TTS)"),
+                ft.dropdown.Option("Голос ИИ (OpenAI TTS)"),
+            ]
+        )
+
+        stt_mode_dd = ft.Dropdown(
+            label="Распознавание голоса (микрофон)",
+            value=get_setting("stt_mode") or "Средствами телефона (Android)",
+            options=[
+                ft.dropdown.Option("Средствами телефона (Android)"),
+                ft.dropdown.Option("ИИ (Whisper API)"),
             ]
         )
 
@@ -757,12 +872,13 @@ async def main(page: ft.Page):
                 set_setting(get_provider_key_name(selected_provider), api_key_tf.value or "")
                 set_setting("level", level_dd.value or "A1-A2 (Начальный)")
                 set_setting("topic", topic_tf.value or "Путешествия и кафе")
-                set_setting("tts_mode", tts_mode_dd.value or "Голос ИИ (OpenAI TTS)")
+                set_setting("tts_mode", tts_mode_dd.value or "Бесплатный голос (Android TTS)")
+                set_setting("stt_mode", stt_mode_dd.value or "Средствами телефона (Android)")
                 set_setting("auto_tts", "1" if auto_tts_sw.value else "0")
                 save_status_text.value = f"✅ Настройки и ключ для {selected_provider} сохранены!"
                 save_status_text.color = ft.Colors.GREEN_700
                 page.update()
-                show_snack("Настройки успешно сохранены!", ft.Colors.GREEN_700)
+                show_snack("Настройки успешно сохранены!", ft.Colors.GREEN_700, duration=1500)
             except Exception as ex:
                 save_status_text.value = f"❌ Ошибка сохранения: {ex}"
                 save_status_text.color = ft.Colors.RED_600
@@ -792,6 +908,7 @@ async def main(page: ft.Page):
                             level_dd,
                             topic_tf,
                             tts_mode_dd,
+                            stt_mode_dd,
                             auto_tts_sw,
                             ft.Button(
                                 content="Сохранить настройки",
