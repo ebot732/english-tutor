@@ -278,7 +278,6 @@ async def main(page: ft.Page):
                 encoder=far.AudioEncoder.WAV
             )
         )
-        # В Flet 1.x сервисы добавляются в page.services, а не в overlay
         page.services.append(recorder)
         page.update()
 
@@ -361,7 +360,6 @@ async def main(page: ft.Page):
 
             try:
                 b64_audio = await asyncio.to_thread(_sync_get_tts_base64, clean_text)
-                # В Flet 1.x аудио-плеер также добавляется в page.services
                 for item in list(page.services):
                     if isinstance(item, fta.Audio):
                         page.services.remove(item)
@@ -379,7 +377,6 @@ async def main(page: ft.Page):
             expand=True,
             border_radius=20,
             bgcolor=ft.Colors.WHITE,
-            # Используем ft.Padding вместо ft.padding
             content_padding=ft.Padding.symmetric(horizontal=16, vertical=10),
             on_submit=lambda e: page.run_task(send_message)
         )
@@ -421,7 +418,6 @@ async def main(page: ft.Page):
                         text=f"+ {w}",
                         icon=ft.Icons.BOOKMARK_ADD_OUTLINED,
                         style=ft.ButtonStyle(
-                            # Используем ft.Padding
                             padding=ft.Padding.symmetric(horizontal=10, vertical=4),
                             bgcolor=ft.Colors.AMBER_100,
                             color=ft.Colors.BLACK87,
@@ -555,7 +551,6 @@ async def main(page: ft.Page):
                         ],
                         alignment=ft.MainAxisAlignment.SPACE_BETWEEN
                     ),
-                    # Используем ft.Padding
                     padding=ft.Padding.symmetric(horizontal=16, vertical=8),
                     bgcolor=ft.Colors.WHITE
                 ),
@@ -637,7 +632,6 @@ async def main(page: ft.Page):
             [
                 ft.Container(
                     content=ft.Text("Мой словарь", size=18, weight=ft.FontWeight.BOLD),
-                    # Используем ft.Padding
                     padding=ft.Padding.symmetric(horizontal=16, vertical=14),
                     bgcolor=ft.Colors.WHITE,
                     width=float("inf")
@@ -669,7 +663,7 @@ async def main(page: ft.Page):
         provider_dd = ft.Dropdown(
             label="Провайдер ИИ",
             value=initial_provider,
-            on_change=on_provider_change,
+            on_select=on_provider_change,  # ← заменено с on_change на on_select
             options=[
                 ft.dropdown.Option("OpenRouter (Бесплатно)"),
                 ft.dropdown.Option("ProxyAPI"),
@@ -731,7 +725,6 @@ async def main(page: ft.Page):
             [
                 ft.Container(
                     content=ft.Text("Настройки обучения и ИИ", size=18, weight=ft.FontWeight.BOLD),
-                    # Используем ft.Padding
                     padding=ft.Padding.symmetric(horizontal=16, vertical=14),
                     bgcolor=ft.Colors.WHITE,
                     width=float("inf")

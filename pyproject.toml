@@ -14,7 +14,7 @@ dependencies = [
 [tool.flet]
 org = "com.aitutor"
 product = "English Tutor"
-build_number = 9
+build_number = 10
 
 [tool.flet.android]
 min_sdk_version = 24
