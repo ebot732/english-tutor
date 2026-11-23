@@ -89,11 +89,11 @@ def init_db():
 
     cursor.execute("SELECT value FROM settings WHERE key = 'api_key'")
     old_row = cursor.fetchone()
-    if old_row and old_row:
+    if old_row and old_row[0]:
         cursor.execute("SELECT value FROM settings WHERE key = 'provider'")
         prov_row = cursor.fetchone()
-        target_key = get_provider_key_name(prov_row if prov_row else "")
-        cursor.execute("UPDATE settings SET value = ? WHERE key = ? AND value = ''", (old_row, target_key))
+        target_key = get_provider_key_name(prov_row[0] if prov_row else "")
+        cursor.execute("UPDATE settings SET value = ? WHERE key = ? AND value = ''", (old_row[0], target_key))
         cursor.execute("DELETE FROM settings WHERE key = 'api_key'")
 
     conn.commit()
@@ -108,7 +108,8 @@ def get_setting(key: str) -> str:
     cursor.execute("SELECT value FROM settings WHERE key = ?", (key,))
     row = cursor.fetchone()
     conn.close()
-    return str(row) if row and row is not None else ""
+    return str(row[0]) if row and row[0] is not None else ""
+
 
 
 def set_setting(key: str, value: str):
@@ -131,7 +132,6 @@ def get_ai_config() -> tuple[str, str, str]:
         return "https://api.vsegpt.ru/v1", api_key, "openai/gpt-4o-mini"
     else:
         return "https://openrouter.ai/api/v1", api_key, "openrouter/free"
-
 
 async def ask_llm(messages: list[dict], temperature: float = 0.7) -> str:
     base_url, api_key, model = get_ai_config()
@@ -156,12 +156,13 @@ async def ask_llm(messages: list[dict], temperature: float = 0.7) -> str:
             data = response.json()
             if "error" in data:
                 raise RuntimeError(str(data["error"]))
-            return data["choices"]["message"]["content"].strip()
+            return data["choices"][0]["message"]["content"].strip()
         except httpx.HTTPStatusError as e:
             err_body = e.response.text
             raise RuntimeError(f"Ошибка сервера {e.response.status_code} ({base_url}): {err_body[:200]}")
         except httpx.RequestError as e:
             raise RuntimeError(f"Ошибка сети ({base_url}): {e}")
+
 
 
 async def recognize_audio_async(file_path: str) -> str:
@@ -298,7 +299,7 @@ async def main(page: ft.Page):
 
         recorder = far.AudioRecorder(
             configuration=far.AudioRecorderConfiguration(
-                encoder=far.AudioEncoder.AAC_LC
+                encoder=far.AudioEncoder.AACLC
             )
         )
         page.services.append(recorder)
