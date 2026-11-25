@@ -1,17 +1,14 @@
-# === ЧАСТЬ 1 из 8 ===
+# === ЧАСТЬ 1 из 5 (строки 1–135) ===
 import os
 import re
 import json
 import time
 import wave
-import base64
 import sqlite3
 import tempfile
 import asyncio
 import traceback
-import urllib.request
 import urllib.parse
-import urllib.error
 import tomllib
 import httpx
 import flet as ft
@@ -64,7 +61,8 @@ def _clean_tuple_str(val: str) -> str:
     if s.startswith('("') and s.endswith('",)'):
         return s[2:-3]
     return s
-# === ЧАСТЬ 2 из 8 ===
+
+
 def init_db():
     os.makedirs(STORAGE_DIR, exist_ok=True)
     conn = sqlite3.connect(DB_PATH)
@@ -97,8 +95,8 @@ def init_db():
         "level": "A1-A2 (Начальный)",
         "topic": "Путешествия и кафе",
         "auto_tts": "0",
-        "tts_mode": "Бесплатный голос (Google TTS)",
-        "stt_mode": "Бесплатный (Google Speech)"
+        "tts_mode": "Встроенный в Android (Google)",
+        "stt_mode": "Встроенный в Android (Google)"
     }
     for k, v in defaults.items():
         cursor.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (k, v))
@@ -109,8 +107,15 @@ def init_db():
         if cleaned != str(v):
             cursor.execute("UPDATE settings SET value = ? WHERE key = ?", (cleaned, k))
 
-    cursor.execute("UPDATE settings SET value = 'Бесплатный голос (Google TTS)' WHERE key = 'tts_mode' AND value = 'Голос телефона (Android TTS)'")
-    cursor.execute("UPDATE settings SET value = 'Бесплатный (Google Speech)' WHERE key = 'stt_mode' AND value = 'Средствами телефона (Android)'")
+    # Миграция старых нерабочих настроек бесплатного Google Speech на системный Android
+    cursor.execute(
+        "UPDATE settings SET value = 'Встроенный в Android (Google)' "
+        "WHERE key = 'stt_mode' AND value IN ('Бесплатный (Google Speech)', 'Средствами телефона (Android)')"
+    )
+    cursor.execute(
+        "UPDATE settings SET value = 'Встроенный в Android (Google)' "
+        "WHERE key = 'tts_mode' AND value IN ('Бесплатный голос (Google TTS)', 'Голос телефона (Android TTS)')"
+    )
 
     cursor.execute("SELECT value FROM settings WHERE key = 'api_key'")
     old_val = _first(cursor.fetchone())
@@ -123,807 +128,870 @@ def init_db():
 
     conn.commit()
     conn.close()
-
-
-def get_setting(key: str) -> str:
-    if key == "api_key":
-        key = get_provider_key_name(get_setting("provider"))
+# === ЧАСТЬ 2 из 5 (строки 136–275) ===
+def get_setting(key: str, default: str = "") -> str:
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("SELECT value FROM settings WHERE key = ?", (key,))
-    val = _first(cursor.fetchone())
+    row = cursor.fetchone()
     conn.close()
-    return _clean_tuple_str(str(val)) if val is not None else ""
+    if row is None:
+        return default
+    val = _first(row, default)
+    return _clean_tuple_str(str(val))
 
 
 def set_setting(key: str, value: str):
-    if key == "api_key":
-        key = get_provider_key_name(get_setting("provider"))
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, str(value)))
+    cursor.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, _clean_tuple_str(str(value))))
     conn.commit()
     conn.close()
 
 
-def get_ai_config() -> tuple[str, str, str]:
-    provider = get_setting("provider").strip()
-    api_key = get_setting(get_provider_key_name(provider)).strip()
+def get_system_prompt() -> str:
+    level = get_setting("level", "A1-A2 (Начальный)")
+    topic = get_setting("topic", "Путешествия и кафе")
+    return f"""Ты — дружелюбный, терпеливый и профессиональный репетитор английского языка для русскоговорящего ученика.
+Уровень ученика: {level}.
+Текущая тема беседы: {topic}.
 
-    if provider == "ProxyAPI":
-        url = _build_url(["api", "proxyapi", "ru"], ["v1"])
-        return url, api_key, "openai/gpt-5-mini"
-    elif provider == "VseGPT":
-        url = _build_url(["api", "vsegpt", "ru"], ["v1"])
-        return url, api_key, "openai/gpt-4o-mini"
-    else:
-        url = _build_url(["openrouter", "ai"], ["api", "v1"])
-        return url, api_key, "openrouter/free"
-# === ЧАСТЬ 3 из 8 ===
-async def ask_llm(messages: list[dict], temperature: float = 0.7) -> str:
-    base_url, api_key, model = get_ai_config()
-    url = f"{base_url}/chat/completions"
-    referer_url = _build_url(["github", "com"], [])
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-        "HTTP-Referer": referer_url,
-        "X-Title": "EnglishTutorApp",
-        "User-Agent": "EnglishTutorApp/1.0"
-    }
-    payload = {
-        "model": model,
-        "messages": messages,
-    }
-    if not model.startswith("openai/gpt-5"):
-        payload["temperature"] = temperature
-
-    async with httpx.AsyncClient(timeout=35.0, verify=False) as client:
-        try:
-            response = await client.post(url, headers=headers, json=payload)
-            response.raise_for_status()
-            data = response.json()
-            if "error" in data:
-                raise RuntimeError(str(data["error"]))
-            first_choice = _first(data.get("choices"), {})
-            return first_choice.get("message", {}).get("content", "").strip()
-        except httpx.HTTPStatusError as e:
-            err_body = e.response.text
-            raise RuntimeError(f"Ошибка сервера {e.response.status_code} ({base_url}): {err_body[:200]}")
-        except httpx.RequestError as e:
-            raise RuntimeError(f"Ошибка сети ({base_url}): {e}")
-
-
-async def _recognize_google_free_wav(wav_path: str) -> str:
-    with wave.open(wav_path, "rb") as wf:
-        sample_rate = wf.getframerate()
-        pcm_data = wf.readframes(wf.getnframes())
-
-    if len(pcm_data) < 1000:
-        raise RuntimeError("Запись слишком короткая")
-
-    query = urllib.parse.urlencode({
-        "output": "json",
-        "lang": "en-US",
-        "key": "AIzaSyBOti4mM-6x9WDnZIjIeyEU21OpBXqQaGw",
-    })
-    url = _build_url(["www", "google", "com"], ["speech-api", "v2", "recognize"], query=query)
-    headers = {
-        "Content-Type": f"audio/l16; rate={sample_rate};",
-        "User-Agent": "Mozilla/5.0",
-    }
-
-    async with httpx.AsyncClient(timeout=20.0, verify=False) as client:
-        resp = await client.post(url, headers=headers, content=pcm_data)
-        resp.raise_for_status()
-        for line in resp.text.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                obj = json.loads(line)
-                first_res = _first(obj.get("result"), {})
-                first_alt = _first(first_res.get("alternative"), {})
-                transcript = first_alt.get("transcript", "").strip()
-                if transcript:
-                    return transcript
-            except Exception:
-                continue
-    return ""
-
-
-async def recognize_audio_async(file_path: str) -> str:
-    if not os.path.exists(file_path) or os.path.getsize(file_path) < 100:
-        raise RuntimeError("Файл записи пуст или не создан")
-
-    stt_mode = get_setting("stt_mode").strip() or "Бесплатный (Google Speech)"
-
-    if stt_mode == "Бесплатный (Google Speech)":
-        return await _recognize_google_free_wav(file_path)
-
-    provider = get_setting("provider").strip()
-    base_url, api_key, _ = get_ai_config()
-
-    if provider in ("ProxyAPI", "VseGPT") and api_key:
-        whisper_url = f"{base_url}/audio/transcriptions"
-        whisper_model = "openai/whisper-1" if provider == "ProxyAPI" else "whisper-1"
-        headers = {"Authorization": f"Bearer {api_key}"}
-        async with httpx.AsyncClient(timeout=30.0, verify=False) as client:
-            with open(file_path, "rb") as audio_file:
-                files = {"file": (os.path.basename(file_path), audio_file, "audio/wav")}
-                data = {"model": whisper_model, "language": "en"}
-                response = await client.post(whisper_url, headers=headers, data=data, files=files)
-                if response.status_code == 401:
-                    raise RuntimeError("Неверный API-ключ для Whisper. Проверьте ключ в Настройках.")
-                if response.status_code >= 400:
-                    raise RuntimeError(f"Ошибка Whisper ({response.status_code}): {response.text[:180]}")
-                res_json = response.json()
-                return (res_json.get("text") or "").strip()
-
-    raise RuntimeError("Для распознавания через ИИ нужен ключ ProxyAPI или VseGPT в Настройках.")
-# === ЧАСТЬ 4 из 8 ===
-async def get_tts_bytes_async(clean_text: str, use_ai: bool = False) -> bytes:
-    normalized = " ".join(clean_text.split())[:400]
-    base_url, api_key, _ = get_ai_config()
-    provider = get_setting("provider").strip()
-    last_err = "Нет доступного сервиса озвучки"
-
-    async with httpx.AsyncClient(timeout=20.0, verify=False) as client:
-        if use_ai and provider in ("ProxyAPI", "VseGPT") and api_key:
-            try:
-                tts_url = f"{base_url}/audio/speech"
-                tts_model = "openai/tts-1" if provider == "ProxyAPI" else "tts-1"
-                headers = {
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                }
-                payload = {
-                    "model": tts_model,
-                    "input": normalized,
-                    "voice": "nova",
-                    "response_format": "mp3"
-                }
-                resp = await client.post(tts_url, headers=headers, json=payload)
-                if resp.status_code == 200 and len(resp.content) > 500:
-                    return resp.content
-                last_err = f"TTS API ({resp.status_code}): {resp.text[:150]}"
-            except Exception as e:
-                last_err = f"TTS API: {e}"
-
-        free_urls = [
-            _build_url(
-                ["translate", "google", "com"],
-                ["translate_tts"],
-                urllib.parse.urlencode({"ie": "UTF-8", "q": normalized[:200], "tl": "en", "client": "gtx"}),
-            ),
-            _build_url(
-                ["api", "streamelements", "com"],
-                ["kappa", "v2", "speech"],
-                urllib.parse.urlencode({"voice": "Brian", "text": normalized[:200]}),
-            ),
-        ]
-        for url in free_urls:
-            try:
-                resp = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
-                if resp.status_code == 200 and len(resp.content) > 500 and not resp.content.lstrip().startswith(b"<"):
-                    return resp.content
-            except Exception as e:
-                last_err = str(e)
-
-    raise RuntimeError(last_err)
-
-
-def build_system_prompt() -> str:
-    level = get_setting("level")
-    topic = get_setting("topic")
-    return (
-        f"Ты дружелюбный репетитор английского языка. Уровень ученика: {level}.\n"
-        f"Веди с ним простой диалог на выбранную тему: {topic}.\n"
-        "Правила:\n"
-        "1. Пиши короткие и простые фразы на английском (1-2 предложения), используй базовую лексику.\n"
-        "2. После своей реплики на английском, с новой строки в скобках дай её перевод на русский.\n"
-        "   ВАЖНО: Если в своей реплике ты используешь новое для ученика слово (не из базовой лексики), "
-        "выдели его двойными звёздочками, например: **delicious**.\n"
-        "3. Если ученик допустил ошибку в грамматике, выборе слов или правописании, "
-        "сначала мягко поправь его на русском языке, объясни как правильно, а затем продолжи диалог.\n"
-        "4. Всегда заканчивай свой ответ простым вопросом, чтобы ученик мог продолжить разговор."
-    )
+Правила общения:
+1. Веди диалог преимущественно на английском языке, адаптируя сложность лексики и грамматики под уровень {level}.
+2. После каждой своей реплики на английском обязательно давай её точный перевод на русский язык в круглых скобках: (перевод).
+3. Если ученик допустил грамматическую или лексическую ошибку, мягко поправь его на русском языке в начале сообщения, приведи правильный вариант и затем продолжи диалог по теме.
+4. Задавай в конце ответа один короткий вовлекающий вопрос на английском (с переводом в скобках), чтобы поддерживать беседу.
+5. Отвечай лаконично (2-4 предложения на английском + перевод), без длинных лекций."""
 
 
 def extract_english_part(text: str) -> str:
-    cleaned = re.sub(r'\(.*?\)', '', text, flags=re.DOTALL)
-    cleaned = cleaned.replace("**", "").strip()
+    """Извлекает исключительно английский текст для озвучки, полностью удаляя русский язык и переводы."""
+    # 1. Удаляем все фрагменты в скобках (обычно там русский перевод)
+    cleaned = re.sub(r"\([^)]*\)", " ", text)
+    # 2. Удаляем любые слова с кириллицей (например, объяснение ошибок на русском языке)
+    cleaned = re.sub(r"[а-яА-ЯёЁ]+", " ", cleaned)
+    # 3. Убираем символы форматирования Markdown (*, _, #, `) и лишнюю пунктуацию
+    cleaned = re.sub(r"[*_#`~<>]", " ", cleaned)
+    cleaned = re.sub(r"\s+([.,!?;:])", r"\1", cleaned)
+    # 4. Схлопываем множественные пробелы и висячие дефисы
+    cleaned = re.sub(r"\s-\s", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
     return cleaned
 
 
-async def main(page: ft.Page):
-    try:
-        init_db()
+class AndroidNativeSpeech:
+    """Мост к встроенному в Android приложению 'Распознавание и синтез речи от Google'."""
 
-        page.title = "English AI Tutor"
-        page.theme_mode = ft.ThemeMode.LIGHT
-        page.padding = 0
-        page.bgcolor = "#F4F6F9"
+    def __init__(self):
+        self._tts = None
+        self._tts_ready = False
+        self._jnius_available = False
+        try:
+            import jnius  # noqa: F401
+            self._jnius_available = True
+        except Exception:
+            self._jnius_available = False
 
-        def show_snack(msg: str, color: str = ft.Colors.BLUE_700, duration: int = 3000):
-            sb = ft.SnackBar(
-                ft.Text(msg, color=ft.Colors.WHITE),
-                bgcolor=color,
-                duration=duration,
-            )
-            page.overlay.append(sb)
-            sb.open = True
-            page.update()
+    def is_available(self) -> bool:
+        return self._jnius_available
 
-        chat_list = ft.ListView(expand=True, spacing=12, padding=15, auto_scroll=True)
+    def _ensure_tts(self) -> bool:
+        if not self._jnius_available:
+            return False
+        if self._tts is not None and self._tts_ready:
+            return True
+        try:
+            from jnius import autoclass
+            PythonActivity = autoclass("org.kivy.android.PythonActivity")
+            TextToSpeech = autoclass("android.speech.tts.TextToSpeech")
+            Locale = autoclass("java.util.Locale")
+            activity = PythonActivity.mActivity
+            if activity is None:
+                return False
 
-        recorder = far.AudioRecorder(
-            configuration=far.AudioRecorderConfiguration(
-                encoder=far.AudioEncoder.WAV,
-                sample_rate=16000,
-            )
-        )
-        page.services.append(recorder)
-        page.update()
-# === ЧАСТЬ 5 из 8 ===
-        is_recording = False
-        temp_audio_path = os.path.join(STORAGE_DIR, "temp_recording.wav")
-
-        mic_button = ft.IconButton(
-            icon=ft.Icons.MIC_ROUNDED,
-            icon_color=ft.Colors.BLUE_600,
-            tooltip="Голосовой ввод (нажмите для старта, ещё раз — для остановки)",
-        )
-
-        async def mic_button_click(e):
-            nonlocal is_recording
-            if is_recording:
-                try:
-                    recorded_path = await recorder.stop_recording()
-                    is_recording = False
-                    mic_button.icon = ft.Icons.MIC_ROUNDED
-                    mic_button.icon_color = ft.Colors.BLUE_600
-                    loading_indicator.visible = True
-                    page.update()
-                    show_snack("Распознаю речь...", ft.Colors.BLUE_700, duration=1200)
-
-                    actual_path = recorded_path if (recorded_path and os.path.exists(recorded_path)) else temp_audio_path
-                    text = await recognize_audio_async(actual_path)
-
-                    loading_indicator.visible = False
-                    if text:
-                        user_input.value = text
-                        page.update()
-                        await send_message()
-                    else:
-                        page.update()
-                        show_snack("Речь не распознана. Попробуйте говорить четче.", ft.Colors.ORANGE_700, duration=1500)
-                except Exception as ex:
-                    is_recording = False
-                    loading_indicator.visible = False
-                    mic_button.icon = ft.Icons.MIC_ROUNDED
-                    mic_button.icon_color = ft.Colors.BLUE_600
-                    page.update()
-                    chat_list.controls.append(build_message_bubble("error", f"🎤 Ошибка распознавания: {ex}"))
-                    page.update()
-            else:
-                try:
-                    has_perm = await recorder.has_permission()
-                    if not has_perm:
-                        show_snack("Выдайте разрешение на микрофон и нажмите кнопку снова", ft.Colors.ORANGE_700, duration=2000)
-                        return
-
-                    if os.path.exists(temp_audio_path):
-                        try:
-                            os.remove(temp_audio_path)
-                        except Exception:
-                            pass
-
-                    await recorder.start_recording(output_path=temp_audio_path)
-
-                    is_recording = True
-                    mic_button.icon = ft.Icons.STOP_CIRCLE_ROUNDED
-                    mic_button.icon_color = ft.Colors.RED_400
-                    page.update()
-                    show_snack("Идет запись... Нажмите красную кнопку для отправки.", ft.Colors.GREEN_700, duration=800)
-                except Exception as ex:
-                    is_recording = False
-                    mic_button.icon = ft.Icons.MIC_ROUNDED
-                    mic_button.icon_color = ft.Colors.BLUE_600
-                    page.update()
-                    show_snack(f"Ошибка микрофона: {ex}", ft.Colors.RED_600, duration=2000)
-
-        mic_button.on_click = lambda e: page.run_task(mic_button_click, e)
-
-        async def speak_text(english_text: str):
-            clean_text = extract_english_part(english_text)
-            if not clean_text:
-                return
-
-            tts_mode = get_setting("tts_mode").strip() or "Бесплатный голос (Google TTS)"
-
+            # Инициализация системного синтезатора речи Google (com.google.android.tts)
+            self._tts = TextToSpeech(activity, None, "com.google.android.tts")
+            time.sleep(0.35)
+            self._tts.setLanguage(Locale.US)
+            self._tts_ready = True
+            return True
+        except Exception:
             try:
-                use_ai = (tts_mode == "Голос ИИ (OpenAI TTS)")
-                audio_bytes = await get_tts_bytes_async(clean_text, use_ai=use_ai)
-
-                tts_path = os.path.join(STORAGE_DIR, f"tts_{int(time.time() * 1000)}.mp3")
-                with open(tts_path, "wb") as f:
-                    f.write(audio_bytes)
-
-                for fname in os.listdir(STORAGE_DIR):
-                    if fname.startswith("tts_") and fname.endswith(".mp3") and os.path.join(STORAGE_DIR, fname) != tts_path:
-                        try:
-                            os.remove(os.path.join(STORAGE_DIR, fname))
-                        except Exception:
-                            pass
-
-                for item in list(page.services):
-                    if isinstance(item, fta.Audio):
-                        page.services.remove(item)
-
-                player = fta.Audio(src=tts_path, autoplay=True, playback_rate=0.9)
-                page.services.append(player)
-                page.update()
-            except Exception as e:
-                chat_list.controls.append(
-                    build_message_bubble("error", f"🔊 Ошибка озвучки: {e}")
-                )
-                page.update()
-
-        user_input = ft.TextField(
-            hint_text="Напишите или надиктуйте на EN...",
-            expand=True,
-            border_radius=20,
-            bgcolor=ft.Colors.WHITE,
-            content_padding=ft.Padding.symmetric(horizontal=16, vertical=10),
-            on_submit=lambda e: page.run_task(send_message)
-        )
-        loading_indicator = ft.ProgressBar(visible=False, color=ft.Colors.BLUE_600)
-
-        async def save_word_to_dict(word: str):
-            word_clean = re.sub(r'[^\w\s-]', '', word).strip().lower()
-            if not word_clean:
-                return
-            show_snack(f"Перевожу и сохраняю «{word_clean}»...")
-            try:
-                translation = await ask_llm([{
-                    "role": "user",
-                    "content": f"Дай только перевод на русский язык для английского слова '{word_clean}' (1-2 слова, без лишнего текста)."
-                }], temperature=0.3)
+                from jnius import autoclass
+                PythonActivity = autoclass("org.kivy.android.PythonActivity")
+                TextToSpeech = autoclass("android.speech.tts.TextToSpeech")
+                Locale = autoclass("java.util.Locale")
+                self._tts = TextToSpeech(PythonActivity.mActivity, None)
+                time.sleep(0.35)
+                self._tts.setLanguage(Locale.US)
+                self._tts_ready = True
+                return True
             except Exception:
-                translation = "Перевод не получен"
+                self._tts_ready = False
+                return False
+
+    def speak_english(self, text: str) -> bool:
+        """Озвучивает английский текст через встроенный синтезатор Android."""
+        if not text.strip():
+            return False
+        if not self._ensure_tts():
+            return False
+        try:
+            from jnius import autoclass
+            TextToSpeech = autoclass("android.speech.tts.TextToSpeech")
+            Locale = autoclass("java.util.Locale")
+            self._tts.setLanguage(Locale.US)
+            # QUEUE_FLUSH = 0
+            self._tts.speak(text, TextToSpeech.QUEUE_FLUSH, None, "tutor_en_tts")
+            return True
+        except Exception:
+            return False
+
+    def recognize_via_system_dialog(self, language: str = "en-US", timeout_sec: float = 15.0) -> str:
+        """Запускает системное окно распознавания речи Google (RecognizerIntent) и ждёт результат."""
+        if not self._jnius_available:
+            raise RuntimeError("Встроенный движок Android недоступен на этой платформе.")
+        from jnius import autoclass
+        PythonActivity = autoclass("org.kivy.android.PythonActivity")
+        Intent = autoclass("android.content.Intent")
+        RecognizerIntent = autoclass("android.speech.RecognizerIntent")
+        SpeechRecognizer = autoclass("android.speech.SpeechRecognizer")
+
+        activity = PythonActivity.mActivity
+        if activity is None:
+            raise RuntimeError("Не удалось получить контекст Android Activity.")
+
+        intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+        intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+        intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE, language)
+        intent.putExtra(RecognizerIntent.EXTRA_PROMPT, "Говорите по-английски...")
+        intent.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
+
+        # Регистрируем обработчик результата активности (если поддерживается обёрткой Flet/Android)
+        result_holder = {"done": False, "text": "", "error": ""}
+        req_code = 40921
+
+        try:
+            from android import activity as android_activity
+
+            def _on_activity_result(request_code, result_code, data):
+                if request_code != req_code:
+                    return
+                try:
+                    # Activity.RESULT_OK == -1
+                    if result_code == -1 and data is not None:
+                        matches = data.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
+                        if matches is not None and matches.size() > 0:
+                            result_holder["text"] = str(matches.get(0))
+                    else:
+                        result_holder["error"] = "Распознавание отменено."
+                except Exception as e:
+                    result_holder["error"] = f"Ошибка чтения результата: {e}"
+                finally:
+                    result_holder["done"] = True
+
+            android_activity.bind(on_activity_result=_on_activity_result)
+            try:
+                activity.startActivityForResult(intent, req_code)
+                deadline = time.time() + timeout_sec
+                while not result_holder["done"] and time.time() < deadline:
+                    time.sleep(0.1)
+            finally:
+                android_activity.unbind(on_activity_result=_on_activity_result)
+
+            if result_holder["error"]:
+                raise RuntimeError(result_holder["error"])
+            return result_holder["text"].strip()
+        except ImportError:
+            raise RuntimeError("Модуль android.activity не найден. Используйте Whisper API или проверьте сборку APK.")
+# === ЧАСТЬ 3 из 5 (строки 276–415) ===
+class TutorApp:
+    def __init__(self, page: ft.Page):
+        self.page = page
+        self.page.title = "AI English Tutor"
+        self.page.theme_mode = ft.ThemeMode.LIGHT
+        self.page.padding = 0
+        self.page.bgcolor = "#F4F6F9"
+
+        self.is_recording = False
+        self.record_path = os.path.join(STORAGE_DIR, "voice_input.wav")
+        self.tts_path = os.path.join(STORAGE_DIR, "tts_output.mp3")
+        self.is_loading = False
+        self.android_speech = AndroidNativeSpeech()
+
+        self.audio_player = fta.Audio(autoplay=False)
+        self.page.overlay.append(self.audio_player)
+
+        self.audio_recorder = far.AudioRecorder(
+            audio_encoder=far.AudioEncoder.WAV,
+            sample_rate=16000,
+            channels_num=1,
+        )
+        self.page.overlay.append(self.audio_recorder)
+
+        self.init_ui()
+        self.load_history()
+
+    def show_snack(self, text: str, is_error: bool = False):
+        self.page.snack_bar = ft.SnackBar(
+            content=ft.Text(text, color=ft.Colors.WHITE),
+            bgcolor=ft.Colors.RED_600 if is_error else ft.Colors.INDIGO_600,
+            duration=3500
+        )
+        self.page.snack_bar.open = True
+        self.page.update()
+
+    async def speak_text(self, full_text: str):
+        # Извлекаем строго английскую часть (без русского перевода и пояснений)
+        en_text = extract_english_part(full_text)
+        if not en_text:
+            return
+        tts_mode = get_setting("tts_mode", "Встроенный в Android (Google)")
+
+        # 1. Встроенный в Android синтезатор речи (Распознавание и синтез речи от Google)
+        if tts_mode == "Встроенный в Android (Google)":
+            ok = await asyncio.to_thread(self.android_speech.speak_english, en_text)
+            if ok:
+                return
+            # Если запущено не на Android (например, на ПК), плавно переходим на резервный вариант
+
+        # 2. Резервный / облачный вариант (OpenAI TTS через ProxyAPI / VseGPT)
+        provider = get_setting("provider", "ProxyAPI")
+        api_key = get_setting(get_provider_key_name(provider), "").strip()
+        if tts_mode == "OpenAI TTS (через API)" and api_key and provider in ("ProxyAPI", "VseGPT"):
+            try:
+                if provider == "ProxyAPI":
+                    tts_url = _build_url(["api", "proxyapi", "ru"], ["openai", "v1", "audio", "speech"])
+                else:
+                    tts_url = _build_url(["api", "vsegpt", "ru"], ["v1", "audio", "speech"])
+                headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+                payload = {"model": "tts-1", "input": en_text, "voice": "nova"}
+                async with httpx.AsyncClient(timeout=20.0) as client:
+                    resp = await client.post(tts_url, headers=headers, json=payload)
+                    if resp.status_code == 200:
+                        with open(self.tts_path, "wb") as f:
+                            f.write(resp.content)
+                        self.audio_player.src = self.tts_path
+                        self.audio_player.update()
+                        await asyncio.sleep(0.1)
+                        self.audio_player.play()
+                        return
+            except Exception:
+                pass
+
+        # 3. Запасной вариант для ПК / браузера (Google Translate TTS на английском)
+        try:
+            q = urllib.parse.quote(en_text[:200])
+            url = _build_url(
+                ["translate", "googleapis", "com"],
+                ["translate_tts"],
+                f"ie=UTF-8&q={q}&tl=en&client=tw-ob"
+            )
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await client.get(url)
+                if resp.status_code == 200:
+                    with open(self.tts_path, "wb") as f:
+                        f.write(resp.content)
+                    self.audio_player.src = self.tts_path
+                    self.audio_player.update()
+                    await asyncio.sleep(0.1)
+                    self.audio_player.play()
+        except Exception as e:
+            self.show_snack(f"Не удалось озвучить: {e}", is_error=True)
+
+    async def on_mic_click(self, e):
+        stt_mode = get_setting("stt_mode", "Встроенный в Android (Google)")
+
+        # Вариант А: Встроенное в Android распознавание речи (Распознавание и синтез речи от Google)
+        if stt_mode == "Встроенный в Android (Google)":
+            if not self.android_speech.is_available():
+                self.show_snack(
+                    "Встроенный движок Android доступен только на смартфоне. Выберите Whisper API в настройках.",
+                    is_error=True
+                )
+                return
+            try:
+                self.mic_btn.icon = ft.Icons.HEARING
+                self.mic_btn.icon_color = ft.Colors.ORANGE_600
+                self.mic_btn.update()
+                self.show_snack("Слушаю через Google Speech (Android)...")
+
+                recognized_text = await asyncio.to_thread(
+                    self.android_speech.recognize_via_system_dialog, "en-US"
+                )
+                if recognized_text:
+                    self.msg_input.value = recognized_text
+                    self.msg_input.update()
+                    self.show_snack("Речь успешно распознана!")
+                else:
+                    self.show_snack("Речь не распознана. Попробуйте сказать громче.", is_error=True)
+            except Exception as err:
+                self.show_snack(f"Ошибка распознавания Android: {err}", is_error=True)
+            finally:
+                self.mic_btn.icon = ft.Icons.MIC
+                self.mic_btn.icon_color = ft.Colors.INDIGO_600
+                self.mic_btn.update()
+            return
+
+        # Вариант Б: Запись WAV и отправка в Whisper API (через ProxyAPI / VseGPT)
+        if not self.is_recording:
+            try:
+                has_perm = await self.audio_recorder.has_permission_async()
+                if not has_perm:
+                    self.show_snack("Нет разрешения на использование микрофона!", is_error=True)
+                    return
+                if os.path.exists(self.record_path):
+                    os.remove(self.record_path)
+                await self.audio_recorder.start_recording_async(output_path=self.record_path)
+                self.is_recording = True
+                self.mic_btn.icon = ft.Icons.STOP_CIRCLE
+                self.mic_btn.icon_color = ft.Colors.RED_600
+                self.mic_btn.tooltip = "Остановить запись"
+                self.mic_btn.update()
+                self.show_snack("Запись пошла... Говорите по-английски!")
+            except Exception as ex:
+                self.show_snack(f"Ошибка микрофона: {ex}", is_error=True)
+        else:
+            try:
+                await self.audio_recorder.stop_recording_async()
+            except Exception:
+                pass
+            self.is_recording = False
+            self.mic_btn.icon = ft.Icons.MIC
+            self.mic_btn.icon_color = ft.Colors.INDIGO_600
+            self.mic_btn.tooltip = "Голосовой ввод"
+            self.mic_btn.update()
+            await self.process_voice_file()
+# === ЧАСТЬ 4 из 5 (строки 416–550) ===
+    async def process_voice_file(self):
+        if not os.path.exists(self.record_path) or os.path.getsize(self.record_path) < 1000:
+            self.show_snack("Запись слишком короткая или пустая.", is_error=True)
+            return
+
+        self.show_snack("Распознаю речь через Whisper API...")
+        provider = get_setting("provider", "ProxyAPI")
+        api_key = get_setting(get_provider_key_name(provider), "").strip()
+
+        if not api_key or provider not in ("ProxyAPI", "VseGPT"):
+            self.show_snack(
+                "Для Whisper API укажите ключ ProxyAPI/VseGPT или выберите 'Встроенный в Android (Google)'.",
+                is_error=True
+            )
+            return
+
+        try:
+            if provider == "ProxyAPI":
+                stt_url = _build_url(["api", "proxyapi", "ru"], ["openai", "v1", "audio", "transcriptions"])
+            else:
+                stt_url = _build_url(["api", "vsegpt", "ru"], ["v1", "audio", "transcriptions"])
+
+            headers = {"Authorization": f"Bearer {api_key}"}
+            with open(self.record_path, "rb") as audio_file:
+                files = {"file": ("voice.wav", audio_file, "audio/wav")}
+                data = {"model": "whisper-1", "language": "en"}
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    resp = await client.post(stt_url, headers=headers, data=data, files=files)
+                    if resp.status_code == 200:
+                        text = resp.json().get("text", "").strip()
+                        if text:
+                            self.msg_input.value = text
+                            self.msg_input.update()
+                            self.show_snack("Речь распознана!")
+                        else:
+                            self.show_snack("Не удалось разобрать слова.", is_error=True)
+                    else:
+                        self.show_snack(f"Ошибка Whisper ({resp.status_code}): {resp.text[:120]}", is_error=True)
+        except Exception as e:
+            self.show_snack(f"Ошибка распознавания: {e}", is_error=True)
+
+    async def ask_ai(self, user_text: str):
+        provider = get_setting("provider", "ProxyAPI")
+        api_key = get_setting(get_provider_key_name(provider), "").strip()
+        if not api_key:
+            self.show_snack(f"Сначала укажите API-ключ для {provider} в Настройках!", is_error=True)
+            return
+
+        self.is_loading = True
+        self.loading_bar.visible = True
+        self.send_btn.disabled = True
+        self.page.update()
+
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("INSERT INTO messages (role, content) VALUES (?, ?)", ("user", user_text))
+        conn.commit()
+        cursor.execute("SELECT role, content FROM messages ORDER BY id DESC LIMIT 12")
+        rows = cursor.fetchall()
+        conn.close()
+
+        history = [{"role": "system", "content": get_system_prompt()}]
+        for r, c in reversed(rows):
+            history.append({"role": r, "content": c})
+
+        try:
+            if provider == "OpenRouter":
+                url = _build_url(["openrouter", "ai"], ["api", "v1", "chat", "completions"])
+                model = "openai/gpt-4o-mini"
+            elif provider == "ProxyAPI":
+                url = _build_url(["api", "proxyapi", "ru"], ["openai", "v1", "chat", "completions"])
+                model = "gpt-4o-mini"
+            else:
+                url = _build_url(["api", "vsegpt", "ru"], ["v1", "chat", "completions"])
+                model = "openai/gpt-4o-mini"
+
+            headers = {
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json"
+            }
+            payload = {
+                "model": model,
+                "messages": history,
+                "temperature": 0.7,
+                "max_tokens": 500
+            }
+
+            async with httpx.AsyncClient(timeout=45.0) as client:
+                resp = await client.post(url, headers=headers, json=payload)
+                if resp.status_code != 200:
+                    raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:180]}")
+                data = resp.json()
+                ai_reply = data["choices"][0]["message"]["content"].strip()
 
             conn = sqlite3.connect(DB_PATH)
             cursor = conn.cursor()
-            cursor.execute(
-                "INSERT OR REPLACE INTO dictionary (word, translation) VALUES (?, ?)",
-                (word_clean, translation)
-            )
+            cursor.execute("INSERT INTO messages (role, content) VALUES (?, ?)", ("assistant", ai_reply))
             conn.commit()
             conn.close()
-            show_snack(f"Сохранено: {word_clean} — {translation}", ft.Colors.GREEN_700)
-            load_dictionary()
-# === ЧАСТЬ 6 из 8 ===
-        def build_message_bubble(role: str, content: str):
-            is_user = (role == "user")
-            is_error = (role == "error")
-            new_words = re.findall(r'\*\*(.*?)\*\*', content) if (not is_user and not is_error) else []
 
-            word_chips = []
-            for w in set(new_words):
-                word_chips.append(
-                    ft.Button(
-                        content=f"+ {w}",
-                        icon=ft.Icons.BOOKMARK_ADD_OUTLINED,
-                        style=ft.ButtonStyle(
-                            padding=ft.Padding.symmetric(horizontal=10, vertical=4),
-                            bgcolor=ft.Colors.AMBER_100,
-                            color="#DD000000",
+            self.add_message_bubble("assistant", ai_reply)
+
+            if get_setting("auto_tts", "0") == "1":
+                await self.speak_text(ai_reply)
+
+        except Exception as ex:
+            self.show_snack(f"Ошибка ИИ: {ex}", is_error=True)
+        finally:
+            self.is_loading = False
+            self.loading_bar.visible = False
+            self.send_btn.disabled = False
+            self.page.update()
+
+    def add_message_bubble(self, role: str, content: str):
+        is_user = role == "user"
+        controls = [
+            ft.Text(
+                content,
+                color=ft.Colors.WHITE if is_user else ft.Colors.BLACK87,
+                size=15,
+                selectable=True
+            )
+        ]
+
+        if not is_user:
+            # Кнопка озвучки (озвучивает только английскую часть ответа) и сохранения в словарь
+            controls.append(
+                ft.Row(
+                    [
+                        ft.IconButton(
+                            icon=ft.Icons.VOLUME_UP,
+                            icon_size=18,
+                            icon_color=ft.Colors.INDIGO_600,
+                            tooltip="Озвучить английский текст",
+                            on_click=lambda e, txt=content: self.page.run_task(self.speak_text, txt)
                         ),
-                        on_click=lambda e, word=w: page.run_task(save_word_to_dict, word)
-                    )
+                        ft.IconButton(
+                            icon=ft.Icons.BOOKMARK_ADD_OUTLINED,
+                            icon_size=18,
+                            icon_color=ft.Colors.TEAL_600,
+                            tooltip="Сохранить фразу в словарь",
+                            on_click=lambda e, txt=content: self.save_phrase_dialog(txt)
+                        )
+                    ],
+                    spacing=0,
+                    tight=True
                 )
+            )
+# === ЧАСТЬ 5.1 (строки 551–675) ===
+        bubble = ft.Container(
+            content=ft.Column(controls, spacing=4, tight=True),
+            bgcolor=ft.Colors.INDIGO_600 if is_user else ft.Colors.WHITE,
+            padding=ft.padding.symmetric(horizontal=14, vertical=10),
+            border_radius=ft.border_radius.only(
+                top_left=16,
+                top_right=16,
+                bottom_left=4 if is_user else 16,
+                bottom_right=16 if is_user else 4
+            ),
+            shadow=ft.BoxShadow(
+                spread_radius=0,
+                blur_radius=4,
+                color=ft.Colors.with_opacity(0.08, ft.Colors.BLACK),
+                offset=ft.Offset(0, 2)
+            ),
+            width=310
+        )
 
-            bubble_controls = [
-                ft.Text(
-                    content.replace("**", ""),
-                    color=ft.Colors.WHITE if (is_user or is_error) else "#DD000000",
-                    size=15,
-                    selectable=True
+        row = ft.Row(
+            [bubble],
+            alignment=ft.MainAxisAlignment.END if is_user else ft.MainAxisAlignment.START
+        )
+        self.chat_list.controls.append(row)
+        self.chat_list.update()
+
+    def save_phrase_dialog(self, full_text: str):
+        en_only = extract_english_part(full_text)
+        word_field = ft.TextField(label="Фраза на английском", value=en_only[:120], multiline=True)
+        trans_field = ft.TextField(label="Перевод на русский", value="", multiline=True)
+
+        def save_action(e):
+            w = word_field.value.strip()
+            t = trans_field.value.strip()
+            if w:
+                conn = sqlite3.connect(DB_PATH)
+                cursor = conn.cursor()
+                cursor.execute(
+                    "INSERT OR REPLACE INTO dictionary (word, translation) VALUES (?, ?)",
+                    (w, t or "—")
                 )
+                conn.commit()
+                conn.close()
+                self.refresh_dictionary()
+                self.show_snack("Сохранено в словарь!")
+            dlg.open = False
+            self.page.update()
+
+        dlg = ft.AlertDialog(
+            title=ft.Text("Добавить в словарь"),
+            content=ft.Column([word_field, trans_field], tight=True, width=300),
+            actions=[
+                ft.TextButton("Отмена", on_click=lambda e: self.close_dialog(dlg)),
+                ft.ElevatedButton("Сохранить", on_click=save_action)
             ]
+        )
+        self.page.overlay.append(dlg)
+        dlg.open = True
+        self.page.update()
 
-            if not is_user and not is_error:
-                bubble_controls.append(
-                    ft.Row(
-                        [
-                            ft.IconButton(
-                                icon=ft.Icons.VOLUME_UP_ROUNDED,
-                                icon_color=ft.Colors.BLUE_700,
-                                tooltip="Прослушать",
-                                on_click=lambda e, txt=content: page.run_task(speak_text, txt)
-                            ),
-                            *word_chips
-                        ],
-                        wrap=True,
-                        spacing=5
+    def close_dialog(self, dlg: ft.AlertDialog):
+        dlg.open = False
+        self.page.update()
+
+    def load_history(self):
+        self.chat_list.controls.clear()
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT role, content FROM messages ORDER BY id ASC")
+        rows = cursor.fetchall()
+        conn.close()
+
+        if not rows:
+            welcome = (
+                "Hello! I am your AI English tutor. Let's practice together! "
+                "(Привет! Я твой ИИ-репетитор английского. Давай практиковаться вместе!) "
+                "How are you today? (Как твои дела сегодня?)"
+            )
+            self.add_message_bubble("assistant", welcome)
+        else:
+            for r, c in rows:
+                self.add_message_bubble(r, c)
+
+    def refresh_dictionary(self):
+        self.dict_list.controls.clear()
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, word, translation FROM dictionary ORDER BY id DESC")
+        rows = cursor.fetchall()
+        conn.close()
+
+        if not rows:
+            self.dict_list.controls.append(
+                ft.Container(
+                    content=ft.Text("Словарь пока пуст. Сохраняйте фразы из чата!", color=ft.Colors.GREY_600),
+                    padding=20,
+                    alignment=ft.alignment.center
+                )
+            )
+        else:
+            for item_id, w, t in rows:
+                self.dict_list.controls.append(
+                    ft.Card(
+                        content=ft.ListTile(
+                            title=ft.Text(w, weight=ft.FontWeight.BOLD),
+                            subtitle=ft.Text(t),
+                            trailing=ft.Row(
+                                [
+                                    ft.IconButton(
+                                        icon=ft.Icons.VOLUME_UP,
+                                        icon_color=ft.Colors.INDIGO_600,
+                                        on_click=lambda e, txt=w: self.page.run_task(self.speak_text, txt)
+                                    ),
+                                    ft.IconButton(
+                                        icon=ft.Icons.DELETE_OUTLINE,
+                                        icon_color=ft.Colors.RED_400,
+                                        on_click=lambda e, i=item_id: self.delete_dict_item(i)
+                                    )
+                                ],
+                                tight=True
+                            )
+                        )
                     )
                 )
+        self.dict_list.update()
 
-            bg = ft.Colors.BLUE_600 if is_user else (ft.Colors.RED_600 if is_error else ft.Colors.WHITE)
-
-            return ft.Row(
+    def delete_dict_item(self, item_id: int):
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM dictionary WHERE id = ?", (item_id,))
+        conn.commit()
+        conn.close()
+        self.refresh_dictionary()
+# === ЧАСТЬ 5.2 (строки 676–835) ===
+    def show_about_dialog(self, e):
+        app_ver = get_app_version()
+        about_dlg = ft.AlertDialog(
+            title=ft.Row(
                 [
-                    ft.Container(
-                        content=ft.Column(bubble_controls, spacing=6),
-                        bgcolor=bg,
-                        padding=14,
-                        border_radius=16,
-                        width=page.width * 0.82 if page.width else 300,
-                        shadow=ft.BoxShadow(blur_radius=4, color="#1F000000")
+                    ft.Icon(ft.Icons.SCHOOL, color=ft.Colors.INDIGO_600),
+                    ft.Text("О приложении", weight=ft.FontWeight.BOLD)
+                ],
+                spacing=8
+            ),
+            content=ft.Column(
+                [
+                    ft.Text("AI English Tutor", size=17, weight=ft.FontWeight.BOLD),
+                    ft.Text(f"Версия: {app_ver}", size=13, color=ft.Colors.GREY_700),
+                    ft.Divider(height=12),
+                    ft.Text(
+                        "Персональный ИИ-репетитор английского языка для практики живого общения, "
+                        "разбора ошибок и пополнения словарного запаса.",
+                        size=14
+                    ),
+                    ft.Text(
+                        "• Диалоги с ИИ под ваш уровень (A1–C2)\n"
+                        "• Озвучка только английской речи\n"
+                        "• Встроенный голосовой ввод и синтез Android (Google)\n"
+                        "• Личный словарь с озвучкой фраз",
+                        size=13,
+                        color=ft.Colors.BLACK87
                     )
                 ],
-                alignment=ft.MainAxisAlignment.END if is_user else ft.MainAxisAlignment.START
-            )
+                tight=True,
+                spacing=8,
+                width=310
+            ),
+            actions=[
+                ft.TextButton("Закрыть", on_click=lambda ev: self.close_dialog(about_dlg))
+            ],
+            actions_alignment=ft.MainAxisAlignment.END
+        )
+        self.page.overlay.append(about_dlg)
+        about_dlg.open = True
+        self.page.update()
 
-        def load_chat_history():
-            chat_list.controls.clear()
-            conn = sqlite3.connect(DB_PATH)
-            cursor = conn.cursor()
-            cursor.execute("SELECT role, content FROM messages")
-            rows = cursor.fetchall()
-            conn.close()
-            for r, c in rows:
-                chat_list.controls.append(build_message_bubble(r, c))
+    def init_ui(self):
+        # --- Вкладка 1: Чат ---
+        self.chat_list = ft.ListView(expand=True, spacing=10, padding=12, auto_scroll=True)
+        self.loading_bar = ft.ProgressBar(visible=False, color=ft.Colors.INDIGO_600)
 
-        async def send_message():
-            text = (user_input.value or "").strip()
-            if not text:
-                return
-
-            api_key = get_setting("api_key").strip()
-            if not api_key:
-                chat_list.controls.append(
-                    build_message_bubble("error", "⚠️ Сначала вставьте API-ключ во вкладке «Настройки» и нажмите «Сохранить настройки»!")
-                )
-                page.update()
-                return
-
-            user_input.value = ""
-            loading_indicator.visible = True
-            chat_list.controls.append(build_message_bubble("user", text))
-            page.update()
-
-            try:
-                conn = sqlite3.connect(DB_PATH)
-                cursor = conn.cursor()
-                cursor.execute("INSERT INTO messages (role, content) VALUES (?, ?)", ("user", text))
-                conn.commit()
-
-                cursor.execute("SELECT role, content FROM messages ORDER BY id DESC LIMIT 12")
-                history = [{"role": r, "content": c} for r, c in reversed(cursor.fetchall())]
-                conn.close()
-
-                messages_payload = [{"role": "system", "content": build_system_prompt()}] + history
-                ai_reply = await ask_llm(messages_payload, temperature=0.7)
-
-                conn = sqlite3.connect(DB_PATH)
-                cursor = conn.cursor()
-                cursor.execute("INSERT INTO messages (role, content) VALUES (?, ?)", ("assistant", ai_reply))
-                conn.commit()
-                conn.close()
-
-                chat_list.controls.append(build_message_bubble("assistant", ai_reply))
-                loading_indicator.visible = False
-                page.update()
-
-                if get_setting("auto_tts") == "1":
-                    await asyncio.sleep(0.1)
-                    await speak_text(ai_reply)
-
-            except Exception as ex:
-                loading_indicator.visible = False
-                chat_list.controls.append(build_message_bubble("error", f"Ошибка ИИ: {ex}"))
-                page.update()
-# === ЧАСТЬ 7 из 8 ===
-        def clear_chat(e):
-            conn = sqlite3.connect(DB_PATH)
-            cursor = conn.cursor()
-            cursor.execute("DELETE FROM messages")
-            conn.commit()
-            conn.close()
-            chat_list.controls.clear()
-            page.update()
-            show_snack("История диалога очищена")
+        self.msg_input = ft.TextField(
+            hint_text="Напишите или скажите по-английски...",
+            expand=True,
+            border_radius=22,
+            filled=True,
+            bgcolor=ft.Colors.WHITE,
+            content_padding=ft.padding.symmetric(horizontal=16, vertical=10),
+            on_submit=lambda e: self.page.run_task(self.on_send_click, e)
+        )
+        self.mic_btn = ft.IconButton(
+            icon=ft.Icons.MIC,
+            icon_color=ft.Colors.INDIGO_600,
+            tooltip="Голосовой ввод",
+            on_click=lambda e: self.page.run_task(self.on_mic_click, e)
+        )
+        self.send_btn = ft.IconButton(
+            icon=ft.Icons.SEND_ROUNDED,
+            icon_color=ft.Colors.INDIGO_600,
+            tooltip="Отправить",
+            on_click=lambda e: self.page.run_task(self.on_send_click, e)
+        )
 
         chat_view = ft.Column(
             [
+                self.chat_list,
+                self.loading_bar,
                 ft.Container(
-                    content=ft.Row(
-                        [
-                            ft.Text("Чат с репетитором", size=18, weight=ft.FontWeight.BOLD),
-                            ft.IconButton(
-                                icon=ft.Icons.DELETE_SWEEP_OUTLINED,
-                                tooltip="Начать диалог заново",
-                                on_click=clear_chat
-                            )
-                        ],
-                        alignment=ft.MainAxisAlignment.SPACE_BETWEEN
-                    ),
-                    padding=ft.Padding.symmetric(horizontal=16, vertical=8),
-                    bgcolor=ft.Colors.WHITE
-                ),
-                loading_indicator,
-                chat_list,
-                ft.Container(
-                    content=ft.Row(
-                        [
-                            mic_button,
-                            user_input,
-                            ft.IconButton(
-                                icon=ft.Icons.SEND_ROUNDED,
-                                icon_color=ft.Colors.BLUE_600,
-                                on_click=lambda e: page.run_task(send_message)
-                            )
-                        ],
-                        spacing=4
-                    ),
-                    padding=10,
-                    bgcolor=ft.Colors.WHITE
+                    content=ft.Row([self.mic_btn, self.msg_input, self.send_btn], spacing=4),
+                    padding=ft.padding.symmetric(horizontal=8, vertical=6),
+                    bgcolor="#EEF1F6"
                 )
             ],
             expand=True,
             spacing=0
         )
 
-        dict_list = ft.ListView(expand=True, spacing=8, padding=15)
+        # --- Вкладка 2: Словарь ---
+        self.dict_list = ft.ListView(expand=True, spacing=8, padding=12)
+        dict_view = ft.Column([self.dict_list], expand=True)
 
-        def delete_word(word_id: int):
-            conn = sqlite3.connect(DB_PATH)
-            cursor = conn.cursor()
-            cursor.execute("DELETE FROM dictionary WHERE id = ?", (word_id,))
-            conn.commit()
-            conn.close()
-            load_dictionary()
-
-        def load_dictionary():
-            dict_list.controls.clear()
-            conn = sqlite3.connect(DB_PATH)
-            cursor = conn.cursor()
-            cursor.execute("SELECT id, word, translation FROM dictionary ORDER BY id DESC")
-            rows = cursor.fetchall()
-            conn.close()
-
-            if not rows:
-                dict_list.controls.append(
-                    ft.Container(
-                        content=ft.Text(
-                            "Словарь пока пуст.\nНажимайте на кнопки «+ слово» под ответами репетитора, чтобы сохранять новые слова!",
-                            text_align=ft.TextAlign.CENTER,
-                            color=ft.Colors.GREY_600
-                        ),
-                        padding=30
-                    )
-                )
-            else:
-                for wid, word, trans in rows:
-                    dict_list.controls.append(
-                        ft.Card(
-                            content=ft.ListTile(
-                                leading=ft.IconButton(
-                                    icon=ft.Icons.VOLUME_UP,
-                                    icon_color=ft.Colors.BLUE_600,
-                                    on_click=lambda e, w=word: page.run_task(speak_text, w)
-                                ),
-                                title=ft.Text(word, weight=ft.FontWeight.BOLD, size=16),
-                                subtitle=ft.Text(trans, size=14),
-                                trailing=ft.IconButton(
-                                    icon=ft.Icons.DELETE_OUTLINE,
-                                    icon_color=ft.Colors.RED_400,
-                                    on_click=lambda e, i=wid: delete_word(i)
-                                )
-                            )
-                        )
-                    )
-            page.update()
-
-        dict_view = ft.Column(
-            [
-                ft.Container(
-                    content=ft.Text("Мой словарь", size=18, weight=ft.FontWeight.BOLD),
-                    padding=ft.Padding.symmetric(horizontal=16, vertical=14),
-                    bgcolor=ft.Colors.WHITE,
-                    width=float("inf")
-                ),
-                dict_list
-            ],
-            expand=True,
-            spacing=0,
-            visible=False
-        )
-# === ЧАСТЬ 8 из 8 ===
-        initial_provider = get_setting("provider") or "ProxyAPI"
-
-        api_key_tf = ft.TextField(
-            label=f"API-ключ для {initial_provider}",
-            value=get_setting(get_provider_key_name(initial_provider)),
-            password=True,
-            can_reveal_password=True,
-            hint_text="Вставьте ключ для выбранного провайдера"
-        )
-
-        def on_provider_change(e):
-            selected = provider_dd.value or "ProxyAPI"
-            api_key_tf.label = f"API-ключ для {selected}"
-            api_key_tf.value = get_setting(get_provider_key_name(selected))
-            save_status_text.value = ""
-            page.update()
-
-        provider_dd = ft.Dropdown(
+        # --- Вкладка 3: Настройки ---
+        self.provider_dd = ft.Dropdown(
             label="Провайдер ИИ",
-            value=initial_provider,
-            on_select=on_provider_change,
+            value=get_setting("provider", "ProxyAPI"),
             options=[
                 ft.dropdown.Option("ProxyAPI"),
                 ft.dropdown.Option("VseGPT"),
-                ft.dropdown.Option("OpenRouter (Бесплатно)"),
-            ]
+                ft.dropdown.Option("OpenRouter")
+            ],
+            on_change=self.on_provider_change
         )
-
-        level_dd = ft.Dropdown(
-            label="Ваш уровень английского",
-            value=get_setting("level") or "A1-A2 (Начальный)",
+        cur_prov = self.provider_dd.value
+        self.api_key_field = ft.TextField(
+            label=f"API-ключ ({cur_prov})",
+            value=get_setting(get_provider_key_name(cur_prov), ""),
+            password=True,
+            can_reveal_password=True
+        )
+        self.level_dd = ft.Dropdown(
+            label="Уровень английского",
+            value=get_setting("level", "A1-A2 (Начальный)"),
             options=[
                 ft.dropdown.Option("A1-A2 (Начальный)"),
                 ft.dropdown.Option("B1-B2 (Средний)"),
-                ft.dropdown.Option("C1 (Продвинутый)"),
+                ft.dropdown.Option("C1-C2 (Продвинутый)")
             ]
         )
-
-        topic_tf = ft.TextField(
-            label="Тема диалога",
-            value=get_setting("topic") or "Путешествия и кафе",
-            hint_text="Например: Заказ еды, Собеседование, Хобби"
+        self.topic_field = ft.TextField(
+            label="Тема беседы",
+            value=get_setting("topic", "Путешествия и кафе")
         )
-
-        tts_mode_dd = ft.Dropdown(
-            label="Тип озвучки учителя",
-            value=get_setting("tts_mode") or "Бесплатный голос (Google TTS)",
+        self.stt_dd = ft.Dropdown(
+            label="Распознавание речи (микрофон)",
+            value=get_setting("stt_mode", "Встроенный в Android (Google)"),
             options=[
-                ft.dropdown.Option("Бесплатный голос (Google TTS)"),
-                ft.dropdown.Option("Голос ИИ (OpenAI TTS)"),
+                ft.dropdown.Option("Встроенный в Android (Google)"),
+                ft.dropdown.Option("Whisper API (через ProxyAPI / VseGPT)")
             ]
         )
-
-        stt_mode_dd = ft.Dropdown(
-            label="Распознавание голоса (микрофон)",
-            value=get_setting("stt_mode") or "Бесплатный (Google Speech)",
+        self.tts_dd = ft.Dropdown(
+            label="Озвучивание речи (только EN)",
+            value=get_setting("tts_mode", "Встроенный в Android (Google)"),
             options=[
-                ft.dropdown.Option("Бесплатный (Google Speech)"),
-                ft.dropdown.Option("ИИ (Whisper API)"),
+                ft.dropdown.Option("Встроенный в Android (Google)"),
+                ft.dropdown.Option("OpenAI TTS (через API)")
             ]
         )
-
-        auto_tts_sw = ft.Switch(
+        self.auto_tts_sw = ft.Switch(
             label="Автоматически озвучивать ответы учителя",
-            value=(get_setting("auto_tts") == "1")
+            value=get_setting("auto_tts", "0") == "1"
         )
 
-        save_status_text = ft.Text("", color=ft.Colors.GREEN_700, weight=ft.FontWeight.BOLD)
+        save_settings_btn = ft.ElevatedButton(
+            "Сохранить настройки",
+            icon=ft.Icons.SAVE,
+            bgcolor=ft.Colors.INDIGO_600,
+            color=ft.Colors.WHITE,
+            on_click=self.on_save_settings
+        )
+        clear_chat_btn = ft.OutlinedButton(
+            "Очистить историю чата",
+            icon=ft.Icons.DELETE_SWEEP,
+            on_click=self.on_clear_chat
+        )
+        about_btn = ft.OutlinedButton(
+            "О приложении",
+            icon=ft.Icons.INFO_OUTLINE,
+            on_click=self.show_about_dialog
+        )
 
-        def save_settings_click(e):
-            try:
-                selected_provider = provider_dd.value or "ProxyAPI"
-                set_setting("provider", selected_provider)
-                set_setting(get_provider_key_name(selected_provider), api_key_tf.value or "")
-                set_setting("level", level_dd.value or "A1-A2 (Начальный)")
-                set_setting("topic", topic_tf.value or "Путешествия и кафе")
-                set_setting("tts_mode", tts_mode_dd.value or "Бесплатный голос (Google TTS)")
-                set_setting("stt_mode", stt_mode_dd.value or "Бесплатный (Google Speech)")
-                set_setting("auto_tts", "1" if auto_tts_sw.value else "0")
-                save_status_text.value = f"✅ Настройки и ключ для {selected_provider} сохранены!"
-                save_status_text.color = ft.Colors.GREEN_700
-                page.update()
-                show_snack("Настройки успешно сохранены!", ft.Colors.GREEN_700, duration=1500)
-            except Exception as ex:
-                save_status_text.value = f"❌ Ошибка сохранения: {ex}"
-                save_status_text.color = ft.Colors.RED_600
-                page.update()
-
-        settings_view = ft.Column(
+        settings_view = ft.ListView(
             [
-                ft.Container(
-                    content=ft.Text("Настройки обучения и ИИ", size=18, weight=ft.FontWeight.BOLD),
-                    padding=ft.Padding.symmetric(horizontal=16, vertical=14),
-                    bgcolor=ft.Colors.WHITE,
-                    width=float("inf")
-                ),
-                ft.Container(
-                    padding=16,
-                    content=ft.Column(
-                        [
-                            provider_dd,
-                            api_key_tf,
-                            ft.Text(
-                                "Ключи сохраняются отдельно для каждого провайдера. "
-                                "Для РФ без VPN подходят ProxyAPI и VseGPT.",
-                                size=12,
-                                color=ft.Colors.GREY_700
-                            ),
-                            ft.Divider(),
-                            level_dd,
-                            topic_tf,
-                            tts_mode_dd,
-                            stt_mode_dd,
-                            auto_tts_sw,
-                            ft.Button(
-                                content="Сохранить настройки",
-                                icon=ft.Icons.SAVE,
-                                bgcolor=ft.Colors.BLUE_600,
-                                color=ft.Colors.WHITE,
-                                width=float("inf"),
-                                height=48,
-                                on_click=save_settings_click
-                            ),
-                            save_status_text,
-                            ft.Divider(),
-                            ft.Text(
-                                f"Версия приложения: {get_app_version()}",
-                                size=12,
-                                color=ft.Colors.GREY_500,
-                                text_align=ft.TextAlign.CENTER
-                            )
-                        ],
-                        spacing=14,
-                        scroll=ft.ScrollMode.AUTO
-                    ),
-                    expand=True
-                )
+                ft.Text("Настройки репетитора", size=18, weight=ft.FontWeight.BOLD),
+                self.provider_dd,
+                self.api_key_field,
+                self.level_dd,
+                self.topic_field,
+                ft.Divider(),
+                ft.Text("Голос и речь", size=16, weight=ft.FontWeight.BOLD),
+                self.stt_dd,
+                self.tts_dd,
+                self.auto_tts_sw,
+                ft.Divider(),
+                ft.Row([save_settings_btn, clear_chat_btn], wrap=True, spacing=10),
+                ft.Container(height=6),
+                about_btn
             ],
             expand=True,
-            spacing=0,
-            visible=False
+            spacing=12,
+            padding=16
         )
 
-        def on_nav_change(e):
-            idx = e.control.selected_index
-            chat_view.visible = (idx == 0)
-            dict_view.visible = (idx == 1)
-            settings_view.visible = (idx == 2)
-            if idx == 1:
-                load_dictionary()
-            page.update()
-
-        page.navigation_bar = ft.NavigationBar(
+        self.tabs = ft.Tabs(
             selected_index=0,
-            on_change=on_nav_change,
-            destinations=[
-                ft.NavigationBarDestination(icon=ft.Icons.CHAT_BUBBLE_OUTLINE, selected_icon=ft.Icons.CHAT_BUBBLE, label="Чат"),
-                ft.NavigationBarDestination(icon=ft.Icons.BOOK_OUTLINED, selected_icon=ft.Icons.BOOK, label="Словарь"),
-                ft.NavigationBarDestination(icon=ft.Icons.SETTINGS_OUTLINED, selected_icon=ft.Icons.SETTINGS, label="Настройки"),
+            animation_duration=200,
+            expand=True,
+            on_change=self.on_tab_change,
+            tabs=[
+                ft.Tab(text="Чат", icon=ft.Icons.CHAT_BUBBLE_OUTLINE, content=chat_view),
+                ft.Tab(text="Словарь", icon=ft.Icons.BOOK_OUTLINED, content=dict_view),
+                ft.Tab(text="Настройки", icon=ft.Icons.SETTINGS_OUTLINED, content=settings_view),
             ]
         )
 
-        load_chat_history()
-        load_dictionary()
-
-        page.add(
-            ft.Stack([chat_view, dict_view, settings_view], expand=True)
+        self.page.add(
+            ft.AppBar(
+                title=ft.Text("AI English Tutor", color=ft.Colors.WHITE, weight=ft.FontWeight.BOLD),
+                bgcolor=ft.Colors.INDIGO_600,
+                center_title=True
+            ),
+            self.tabs
         )
 
-    except Exception:
-        page.add(
-            ft.Container(
-                padding=20,
-                content=ft.Text(
-                    f"Ошибка запуска:\n{traceback.format_exc()}",
-                    color=ft.Colors.RED_700,
-                    size=12,
-                    selectable=True
-                )
-            )
-        )
+    async def on_send_click(self, e):
+        if self.is_loading:
+            return
+        text = (self.msg_input.value or "").strip()
+        if not text:
+            return
+        self.msg_input.value = ""
+        self.msg_input.update()
+        self.add_message_bubble("user", text)
+        await self.ask_ai(text)
 
+    def on_provider_change(self, e):
+        prov = self.provider_dd.value
+        self.api_key_field.label = f"API-ключ ({prov})"
+        self.api_key_field.value = get_setting(get_provider_key_name(prov), "")
+        self.api_key_field.update()
+
+    def on_save_settings(self, e):
+        prov = self.provider_dd.value
+        set_setting("provider", prov)
+        set_setting(get_provider_key_name(prov), self.api_key_field.value.strip())
+        set_setting("level", self.level_dd.value)
+        set_setting("topic", self.topic_field.value.strip() or "Путешествия и кафе")
+        set_setting("stt_mode", self.stt_dd.value)
+        set_setting("tts_mode", self.tts_dd.value)
+        set_setting("auto_tts", "1" if self.auto_tts_sw.value else "0")
+        self.show_snack("Настройки сохранены!")
+
+    def on_clear_chat(self, e):
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM messages")
+        conn.commit()
+        conn.close()
+        self.load_history()
+        self.show_snack("История чата очищена.")
+
+    def on_tab_change(self, e):
+        if self.tabs.selected_index == 1:
+            self.refresh_dictionary()
+
+
+def main(page: ft.Page):
+    init_db()
+    TutorApp(page)
 
 if __name__ == "__main__":
     ft.run(main)
+
