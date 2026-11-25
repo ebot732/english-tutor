@@ -322,11 +322,7 @@ class TutorApp:
         self.audio_player = fta.Audio(autoplay=False)
         self.page.overlay.append(self.audio_player)
 
-        self.audio_recorder = far.AudioRecorder(
-            audio_encoder=far.AudioEncoder.WAV,
-            sample_rate=16000,
-            channels_num=1,
-        )
+        self.audio_recorder = far.AudioRecorder()
         self.page.overlay.append(self.audio_recorder)
 
         self.init_ui()
@@ -442,7 +438,12 @@ class TutorApp:
                     return
                 if os.path.exists(self.record_path):
                     os.remove(self.record_path)
-                await self.audio_recorder.start_recording_async(output_path=self.record_path)
+                await self.audio_recorder.start_recording(
+                    output_path=self.record_path,
+                    encoder=far.AudioEncoder.WAV,
+                    sample_rate=16000,
+                    num_channels=1
+                )
                 self.is_recording = True
                 self.mic_btn.icon = ft.Icons.STOP_CIRCLE
                 self.mic_btn.icon_color = ft.Colors.RED_600
