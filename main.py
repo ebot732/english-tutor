@@ -539,7 +539,7 @@ class TutorApp:
         controls = [
             ft.Text(
                 content,
-                color=ft.Colors.WHITE if is_user else ft.Colors.BLACK87,
+                color=ft.Colors.WHITE if is_user else ft.Colors.BLACK_87,
                 size=15,
                 selectable=True
             )
@@ -722,7 +722,7 @@ class TutorApp:
                         "• Встроенный голосовой ввод и синтез Android (Google)\n"
                         "• Личный словарь с озвучкой фраз",
                         size=13,
-                        color=ft.Colors.BLACK87
+                        color=ft.Colors.BLACK_87
                     )
                 ],
                 tight=True,
