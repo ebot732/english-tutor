@@ -544,7 +544,6 @@ class TutorApp:
                 selectable=True
             )
         ]
-
         if not is_user:
             controls.append(
                 ft.Row(
