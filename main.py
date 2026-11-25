@@ -155,7 +155,7 @@ def get_ai_config() -> tuple[str, str, str]:
 
     if provider == "ProxyAPI":
         url = _build_url(["api", "proxyapi", "ru"], ["openai", "v1", "chat", "completions"])
-        return url, api_key, "gpt-5-mini"
+        return url, api_key, "gpt-4o-mini"
     elif provider == "VseGPT":
         url = _build_url(["api", "vsegpt", "ru"], ["v1", "chat", "completions"])
         return url, api_key, "openai/gpt-4o-mini"
@@ -369,10 +369,10 @@ class TutorApp:
                     output_path=self.record_path,
                     configuration=far.AudioRecorderConfiguration(
                         encoder=far.AudioEncoder.WAV,
-                        sample_rate=16000,
-                        num_channels=1
+                        sample_rate=16000
                     )
                 )
+
                 self.is_recording = True
                 self.mic_btn.icon = ft.Icons.STOP_CIRCLE
                 self.mic_btn.icon_color = ft.Colors.RED_600
