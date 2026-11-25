@@ -154,8 +154,8 @@ def get_ai_config() -> tuple[str, str, str]:
     api_key = get_setting(get_provider_key_name(provider)).strip()
 
     if provider == "ProxyAPI":
-        url = _build_url(["api", "proxyapi", "ru"], ["v1", "chat", "completions"])
-        return url, api_key, "openai/gpt-5-mini"
+        url = _build_url(["api", "proxyapi", "ru"], ["openai", "v1", "chat", "completions"])
+        return url, api_key, "gpt-5-mini"
     elif provider == "VseGPT":
         url = _build_url(["api", "vsegpt", "ru"], ["v1", "chat", "completions"])
         return url, api_key, "openai/gpt-4o-mini"
@@ -201,11 +201,6 @@ class AndroidNativeSpeech:
         self._tts = None
         self._tts_ready = False
         self._jnius_ok = False
-        self._recognizer = None
-        self._listener = None
-        self._stt_text = ""
-        self._stt_error = ""
-        self._stt_done = False
         try:
             import jnius  # noqa: F401
             self._jnius_ok = True
@@ -274,147 +269,7 @@ class AndroidNativeSpeech:
             return True
         except Exception:
             return False
-# === ЧАСТЬ 3 из 6 (строки 286–415) ===
-    def start_background_stt(self, language: str = "en-US") -> bool:
-        """Запускает встроенный SpeechRecognizer Google без диалоговых окон."""
-        if not self._jnius_ok:
-            return False
-        try:
-            from jnius import autoclass, PythonJavaClass, java_method
-            Handler = autoclass("android.os.Handler")
-            Looper = autoclass("android.os.Looper")
-            Intent = autoclass("android.content.Intent")
-            RecognizerIntent = autoclass("android.speech.RecognizerIntent")
-            SpeechRecognizer = autoclass("android.speech.SpeechRecognizer")
-
-            ctx = self._get_android_context()
-            if ctx is None:
-                return False
-
-            self._stt_text = ""
-            self._stt_error = ""
-            self._stt_done = False
-
-            parent = self
-
-            class RecognitionListener(PythonJavaClass):
-                __javainterfaces__ = ["android/speech/RecognitionListener"]
-                __javacontext__ = "app"
-
-                @java_method("(Landroid/os/Bundle;)V")
-                def onReadyForSpeech(self, params):
-                    pass
-
-                @java_method("()V")
-                def onBeginningOfSpeech(self):
-                    pass
-
-                @java_method("(F)V")
-                def onRmsChanged(self, rmsdB):
-                    pass
-
-                @java_method("([B)V")
-                def onBufferReceived(self, buffer):
-                    pass
-
-                @java_method("()V")
-                def onEndOfSpeech(self):
-                    pass
-
-                @java_method("(I)V")
-                def onError(self, error):
-                    parent._stt_error = f"Код ошибки речи: {error}"
-                    parent._stt_done = True
-
-                @java_method("(Landroid/os/Bundle;)V")
-                def onResults(self, results):
-                    try:
-                        matches = results.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                        if matches is not None and matches.size() > 0:
-                            parent._stt_text = str(matches.get(0))
-                    except Exception as ex:
-                        parent._stt_error = str(ex)
-                    finally:
-                        parent._stt_done = True
-
-                @java_method("(Landroid/os/Bundle;)V")
-                def onPartialResults(self, partialResults):
-                    try:
-                        matches = partialResults.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                        if matches is not None and matches.size() > 0:
-                            parent._stt_text = str(matches.get(0))
-                    except Exception:
-                        pass
-
-                @java_method("(ILandroid/os/Bundle;)V")
-                def onEvent(self, eventType, params):
-                    pass
-
-            class StartRunnable(PythonJavaClass):
-                __javainterfaces__ = ["java/lang/Runnable"]
-                __javacontext__ = "app"
-
-                @java_method("()V")
-                def run(self):
-                    try:
-                        if getattr(parent, "_recognizer", None) is not None:
-                            parent._recognizer.destroy()
-                        parent._recognizer = SpeechRecognizer.createSpeechRecognizer(ctx)
-                        parent._listener = RecognitionListener()
-                        parent._recognizer.setRecognitionListener(parent._listener)
-
-                        intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
-                        intent.putExtra(
-                            RecognizerIntent.EXTRA_LANGUAGE_MODEL,
-                            RecognizerIntent.LANGUAGE_MODEL_FREE_FORM
-                        )
-                        intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE, language)
-                        intent.putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, True)
-                        parent._recognizer.startListening(intent)
-                    except Exception as ex:
-                        parent._stt_error = str(ex)
-                        parent._stt_done = True
-
-            self._start_runnable = StartRunnable()
-            Handler(Looper.getMainLooper()).post(self._start_runnable)
-            return True
-        except Exception:
-            return False
-
-    def stop_background_stt(self) -> tuple[str, str]:
-        """Останавливает прослушивание и возвращает (распознанный_текст, ошибка)."""
-        if not self._jnius_ok:
-            return "", "Android Speech недоступен"
-        try:
-            from jnius import autoclass, PythonJavaClass, java_method
-            Handler = autoclass("android.os.Handler")
-            Looper = autoclass("android.os.Looper")
-
-            parent = self
-
-            class StopRunnable(PythonJavaClass):
-                __javainterfaces__ = ["java/lang/Runnable"]
-                __javacontext__ = "app"
-
-                @java_method("()V")
-                def run(self):
-                    try:
-                        if getattr(parent, "_recognizer", None) is not None:
-                            parent._recognizer.stopListening()
-                    except Exception:
-                        pass
-
-            self._stop_runnable = StopRunnable()
-            Handler(Looper.getMainLooper()).post(self._stop_runnable)
-
-            deadline = time.time() + 3.0
-            while not getattr(self, "_stt_done", False) and time.time() < deadline:
-                time.sleep(0.1)
-
-            return (getattr(self, "_stt_text", "") or "").strip(), (getattr(self, "_stt_error", "") or "").strip()
-        except Exception as e:
-            return "", str(e)
-# === ЧАСТЬ 4 из 6 (строки 416–555) ===
+# === ЧАСТЬ 3 из 6 (строки 286–430) ===
 class TutorApp:
     def __init__(self, page: ft.Page):
         self.page = page
@@ -436,14 +291,13 @@ class TutorApp:
         self.init_ui()
         self.load_history()
 
-    def show_snack(self, text: str, is_error: bool = False, duration_ms: int = 3500):
-        self.page.snack_bar = ft.SnackBar(
+    def show_snack(self, text: str, is_error: bool = False, duration_ms: int = 3000):
+        snack = ft.SnackBar(
             content=ft.Text(text, color=ft.Colors.WHITE),
             bgcolor=ft.Colors.RED_600 if is_error else ft.Colors.INDIGO_600,
             duration=duration_ms
         )
-        self.page.snack_bar.open = True
-        self.page.update()
+        self.page.show_dialog(snack)
 
     async def speak_text(self, full_text: str):
         # Озвучиваем исключительно английский текст (без русских слов и переводов)
@@ -459,12 +313,12 @@ class TutorApp:
                 return
 
         # 2. Облачный OpenAI TTS (через ProxyAPI / VseGPT)
-        provider = get_setting("provider") or "ProxyAPI"
+        provider = (get_setting("provider") or "ProxyAPI").strip()
         api_key = get_setting(get_provider_key_name(provider)).strip()
         if tts_mode == "OpenAI TTS (через API)" and api_key and provider in ("ProxyAPI", "VseGPT"):
             try:
                 if provider == "ProxyAPI":
-                    tts_url = _build_url(["api", "proxyapi", "ru"], ["v1", "audio", "speech"])
+                    tts_url = _build_url(["api", "proxyapi", "ru"], ["openai", "v1", "audio", "speech"])
                 else:
                     tts_url = _build_url(["api", "vsegpt", "ru"], ["v1", "audio", "speech"])
                 headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
@@ -503,48 +357,6 @@ class TutorApp:
             self.show_snack(f"Не удалось озвучить: {e}", is_error=True)
 
     async def on_mic_click(self, e):
-        stt_mode = get_setting("stt_mode") or "Встроенный в Android (Google)"
-
-        # Вариант А: Встроенный в Android Google SpeechRecognizer (нажал -> "Говорите..." -> нажал -> текст)
-        if stt_mode == "Встроенный в Android (Google)":
-            if not self.is_recording:
-                has_perm = await self.audio_recorder.has_permission()
-                if not has_perm:
-                    self.show_snack("Нет разрешения на использование микрофона!", is_error=True)
-                    return
-
-                started = await asyncio.to_thread(self.android_speech.start_background_stt, "en-US")
-                if not started:
-                    self.show_snack(
-                        "Встроенный движок Android недоступен. Выберите Whisper API в настройках.",
-                        is_error=True
-                    )
-                    return
-
-                self.is_recording = True
-                self.mic_btn.icon = ft.Icons.STOP_CIRCLE
-                self.mic_btn.icon_color = ft.Colors.RED_600
-                self.mic_btn.tooltip = "Нажмите для обработки голоса"
-                self.mic_btn.update()
-                self.show_snack("Говорите...", duration_ms=500)
-            else:
-                self.is_recording = False
-                self.mic_btn.icon = ft.Icons.MIC
-                self.mic_btn.icon_color = ft.Colors.INDIGO_600
-                self.mic_btn.tooltip = "Голосовой ввод"
-                self.mic_btn.update()
-
-                text, err = await asyncio.to_thread(self.android_speech.stop_background_stt)
-                if text:
-                    self.msg_input.value = text
-                    self.msg_input.update()
-                elif err:
-                    self.show_snack(f"Не удалось распознать ({err})", is_error=True)
-                else:
-                    self.show_snack("Речь не распознана. Попробуйте сказать громче.", is_error=True)
-            return
-
-        # Вариант Б: Запись аудио и отправка в Whisper API (ProxyAPI / VseGPT)
         if not self.is_recording:
             try:
                 has_perm = await self.audio_recorder.has_permission()
@@ -555,18 +367,20 @@ class TutorApp:
                     os.remove(self.record_path)
                 await self.audio_recorder.start_recording(
                     output_path=self.record_path,
-                    config=far.AudioRecorderConfiguration(
+                    configuration=far.AudioRecorderConfiguration(
                         encoder=far.AudioEncoder.WAV,
-                        sample_rate=16000
+                        sample_rate=16000,
+                        num_channels=1
                     )
                 )
                 self.is_recording = True
                 self.mic_btn.icon = ft.Icons.STOP_CIRCLE
                 self.mic_btn.icon_color = ft.Colors.RED_600
-                self.mic_btn.tooltip = "Остановить запись"
+                self.mic_btn.tooltip = "Нажмите для обработки голоса"
                 self.mic_btn.update()
                 self.show_snack("Говорите...", duration_ms=500)
             except Exception as ex:
+                self.is_recording = False
                 self.show_snack(f"Ошибка микрофона: {ex}", is_error=True)
         else:
             try:
@@ -578,27 +392,76 @@ class TutorApp:
             self.mic_btn.icon_color = ft.Colors.INDIGO_600
             self.mic_btn.tooltip = "Голосовой ввод"
             self.mic_btn.update()
+            await asyncio.sleep(0.15)
             await self.process_voice_file()
-# === ЧАСТЬ 5 из 6 (строки 556–705) ===
+# === ЧАСТЬ 4 из 6 (строки 431–595) ===
+    async def _recognize_google_wav(self, wav_path: str) -> str:
+        """Отправляет записанный 16kHz WAV в бесплатный распознаватель речи Google."""
+        with wave.open(wav_path, "rb") as wf:
+            pcm_data = wf.readframes(wf.getnframes())
+            rate = wf.getframerate()
+
+        url = _build_url(
+            ["www", "google", "com"],
+            ["speech-api", "v2", "recognize"],
+            "output=json&lang=en-US&client=chromium"
+        )
+        headers = {"Content-Type": f"audio/l16; rate={rate}"}
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            resp = await client.post(url, headers=headers, content=pcm_data)
+            if resp.status_code != 200:
+                return ""
+            for line in resp.text.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                    results = obj.get("result") or []
+                    first_res = _first(results, {})
+                    alts = first_res.get("alternative") or []
+                    first_alt = _first(alts, {})
+                    transcript = (first_alt.get("transcript") or "").strip()
+                    if transcript:
+                        return transcript
+                except Exception:
+                    continue
+        return ""
+
     async def process_voice_file(self):
-        if not os.path.exists(self.record_path) or os.path.getsize(self.record_path) < 1000:
+        if not os.path.exists(self.record_path) or os.path.getsize(self.record_path) < 800:
             self.show_snack("Запись слишком короткая или пустая.", is_error=True)
             return
 
-        self.show_snack("Распознаю речь через Whisper API...", duration_ms=1500)
+        stt_mode = get_setting("stt_mode") or "Встроенный в Android (Google)"
         provider = (get_setting("provider") or "ProxyAPI").strip()
         api_key = get_setting(get_provider_key_name(provider)).strip()
 
+        # 1. Распознавание через Google Speech
+        if stt_mode == "Встроенный в Android (Google)":
+            try:
+                text = await self._recognize_google_wav(self.record_path)
+                if text:
+                    self.msg_input.value = text
+                    self.msg_input.update()
+                    return
+            except Exception:
+                pass
+            if not api_key or provider not in ("ProxyAPI", "VseGPT"):
+                self.show_snack(
+                    "Не удалось распознать речь. Проверьте интернет или выберите Whisper API.",
+                    is_error=True
+                )
+                return
+
+        # 2. Распознавание через Whisper API (ProxyAPI / VseGPT)
         if not api_key or provider not in ("ProxyAPI", "VseGPT"):
-            self.show_snack(
-                "Для Whisper API укажите ключ ProxyAPI/VseGPT или выберите 'Встроенный в Android (Google)'.",
-                is_error=True
-            )
+            self.show_snack("Для Whisper API укажите ключ ProxyAPI или VseGPT в Настройках.", is_error=True)
             return
 
         try:
             if provider == "ProxyAPI":
-                stt_url = _build_url(["api", "proxyapi", "ru"], ["v1", "audio", "transcriptions"])
+                stt_url = _build_url(["api", "proxyapi", "ru"], ["openai", "v1", "audio", "transcriptions"])
             else:
                 stt_url = _build_url(["api", "vsegpt", "ru"], ["v1", "audio", "transcriptions"])
 
@@ -616,7 +479,7 @@ class TutorApp:
                         else:
                             self.show_snack("Не удалось разобрать слова.", is_error=True)
                     else:
-                        self.show_snack(f"Ошибка Whisper ({resp.status_code}): {resp.text[:120]}", is_error=True)
+                        self.show_snack(f"Ошибка Whisper ({resp.status_code}): {resp.text[:100]}", is_error=True)
         except Exception as e:
             self.show_snack(f"Ошибка распознавания: {e}", is_error=True)
 
@@ -658,8 +521,13 @@ class TutorApp:
 
             async with httpx.AsyncClient(timeout=45.0) as client:
                 resp = await client.post(url, headers=headers, json=payload)
+                if resp.status_code != 200 and provider == "ProxyAPI":
+                    alt_url = _build_url(["api", "proxyapi", "ru"], ["v1", "chat", "completions"])
+                    alt_payload = dict(payload, model="openai/gpt-5-mini")
+                    resp = await client.post(alt_url, headers=headers, json=alt_payload)
+
                 if resp.status_code != 200:
-                    raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:180]}")
+                    raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:160]}")
                 data = resp.json()
                 first_choice = _first(data.get("choices"), {})
                 ai_reply = (first_choice.get("message", {}).get("content") or "").strip()
@@ -684,7 +552,7 @@ class TutorApp:
             self.loading_bar.visible = False
             self.send_btn.disabled = False
             self.page.update()
-
+# === ЧАСТЬ 5 из 6 (строки 596–765) ===
     def add_message_bubble(self, role: str, content: str):
         is_user = role == "user"
         controls = [
@@ -745,7 +613,7 @@ class TutorApp:
         )
         self.chat_list.controls.append(row)
         self.chat_list.update()
-# === ЧАСТЬ 6.1 из 6 (строки 706–830) ===
+
     def save_phrase_dialog(self, full_text: str):
         en_only = extract_english_part(full_text)
         word_field = ft.TextField(label="Фраза на английском", value=en_only[:120], multiline=True)
@@ -886,7 +754,7 @@ class TutorApp:
             actions_alignment=ft.MainAxisAlignment.END
         )
         self.page.show_dialog(about_dlg)
-# === ЧАСТЬ 6.2 из 6 (строки 831–985) ===
+# === ЧАСТЬ 6 из 6 (строки 766–925) ===
     def init_ui(self):
         # --- Вкладка 1: Чат ---
         self.chat_list = ft.ListView(expand=True, spacing=10, padding=12, auto_scroll=True)
@@ -1079,7 +947,7 @@ class TutorApp:
         set_setting("stt_mode", self.stt_dd.value)
         set_setting("tts_mode", self.tts_dd.value)
         set_setting("auto_tts", "1" if self.auto_tts_sw.value else "0")
-        self.show_snack("Сохранены", duration_ms=500)
+        self.show_snack("Сохранено", duration_ms=500)
 
     def on_clear_chat(self, e):
         conn = sqlite3.connect(DB_PATH)
@@ -1088,7 +956,7 @@ class TutorApp:
         conn.commit()
         conn.close()
         self.load_history()
-        self.show_snack("Очищено", duration_ms=1000)
+        self.show_snack("Выполнено", duration_ms=1000)
 
     def on_nav_change(self, e):
         idx = self.nav_bar.selected_index
