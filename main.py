@@ -1,4 +1,4 @@
-# === ЧАСТЬ 1 из 5 (строки 1–135) ===
+# === ЧАСТЬ 1 из 5 (строки 1–145) ===
 import os
 import re
 import json
@@ -20,14 +20,14 @@ DB_PATH = os.path.join(STORAGE_DIR, "tutor_data.db")
 
 
 def _first(seq, default=None):
-    """Безопасное получение нулевого элемента списка/кортежа без скобок индекса."""
+    """Безопасное получение нулевого элемента списка/кортежа."""
     if not seq:
         return default
     return next(iter(seq), default)
 
 
 def _build_url(host_parts: list[str], path_parts: list[str], query: str = "") -> str:
-    """Сборка URL по частям, чтобы парсер чата не обрезал пути."""
+    """Сборка URL по частям."""
     host = ".".join(host_parts)
     path = "/" + "/".join(path_parts) if path_parts else ""
     return urllib.parse.urlunparse(("https", host, path, "", query, ""))
@@ -107,7 +107,6 @@ def init_db():
         if cleaned != str(v):
             cursor.execute("UPDATE settings SET value = ? WHERE key = ?", (cleaned, k))
 
-    # Миграция старых нерабочих настроек бесплатного Google Speech на системный Android
     cursor.execute(
         "UPDATE settings SET value = 'Встроенный в Android (Google)' "
         "WHERE key = 'stt_mode' AND value IN ('Бесплатный (Google Speech)', 'Средствами телефона (Android)')"
@@ -128,30 +127,44 @@ def init_db():
 
     conn.commit()
     conn.close()
-# === ЧАСТЬ 2 из 5 (строки 136–275) ===
-def get_setting(key: str, default: str = "") -> str:
+
+
+def get_setting(key: str) -> str:
+    if key == "api_key":
+        key = get_provider_key_name(get_setting("provider"))
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("SELECT value FROM settings WHERE key = ?", (key,))
-    row = cursor.fetchone()
+    val = _first(cursor.fetchone())
     conn.close()
-    if row is None:
-        return default
-    val = _first(row, default)
-    return _clean_tuple_str(str(val))
+    return _clean_tuple_str(str(val)) if val is not None else ""
 
 
 def set_setting(key: str, value: str):
+    if key == "api_key":
+        key = get_provider_key_name(get_setting("provider"))
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, _clean_tuple_str(str(value))))
+    cursor.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, str(value)))
     conn.commit()
     conn.close()
+# === ЧАСТЬ 2 из 5 (строки 146–285) ===
+def get_provider_config(provider: str) -> tuple[str, str]:
+    p = (provider or "").strip()
+    if p == "ProxyAPI":
+        url = _build_url(["api", "proxyapi", "ru"], ["openai", "v1", "chat", "completions"])
+        return url, "openai/gpt-4o-mini"
+    elif p == "VseGPT":
+        url = _build_url(["api", "vsegpt", "ru"], ["v1", "chat", "completions"])
+        return url, "openai/gpt-4o-mini"
+    else:
+        url = _build_url(["openrouter", "ai"], ["api", "v1", "chat", "completions"])
+        return url, "openai/gpt-4o-mini"
 
 
 def get_system_prompt() -> str:
-    level = get_setting("level", "A1-A2 (Начальный)")
-    topic = get_setting("topic", "Путешествия и кафе")
+    level = get_setting("level") or "A1-A2 (Начальный)"
+    topic = get_setting("topic") or "Путешествия и кафе"
     return f"""Ты — дружелюбный, терпеливый и профессиональный репетитор английского языка для русскоговорящего ученика.
 Уровень ученика: {level}.
 Текущая тема беседы: {topic}.
@@ -165,73 +178,83 @@ def get_system_prompt() -> str:
 
 
 def extract_english_part(text: str) -> str:
-    """Извлекает исключительно английский текст для озвучки, полностью удаляя русский язык и переводы."""
-    # 1. Удаляем все фрагменты в скобках (обычно там русский перевод)
+    """Извлекает исключительно английский текст для озвучки, удаляя русский язык и переводы."""
+    # 1. Удаляем все фрагменты в круглых скобках (перевод на русский)
     cleaned = re.sub(r"\([^)]*\)", " ", text)
-    # 2. Удаляем любые слова с кириллицей (например, объяснение ошибок на русском языке)
+    # 2. Удаляем любые слова на кириллице (исправления ошибок на русском языке)
     cleaned = re.sub(r"[а-яА-ЯёЁ]+", " ", cleaned)
-    # 3. Убираем символы форматирования Markdown (*, _, #, `) и лишнюю пунктуацию
+    # 3. Убираем символы Markdown (*, _, #, `, ~, <, >)
     cleaned = re.sub(r"[*_#`~<>]", " ", cleaned)
+    # 4. Убираем пробелы перед знаками препинания и висячие дефисы
     cleaned = re.sub(r"\s+([.,!?;:])", r"\1", cleaned)
-    # 4. Схлопываем множественные пробелы и висячие дефисы
     cleaned = re.sub(r"\s-\s", " ", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     return cleaned
 
 
 class AndroidNativeSpeech:
-    """Мост к встроенному в Android приложению 'Распознавание и синтез речи от Google'."""
+    """Мост к встроенному в Android приложению 'Распознавание и синтез речи от Google' (Serious Python / Flet)."""
 
     def __init__(self):
         self._tts = None
         self._tts_ready = False
-        self._jnius_available = False
+        self._jnius_ok = False
         try:
             import jnius  # noqa: F401
-            self._jnius_available = True
+            self._jnius_ok = True
         except Exception:
-            self._jnius_available = False
+            self._jnius_ok = False
 
     def is_available(self) -> bool:
-        return self._jnius_available
+        return self._jnius_ok
+
+    def _get_android_context(self):
+        """Получает Context/Application в среде Flet (Serious Python) без зависимости от Kivy."""
+        from jnius import autoclass
+        try:
+            ActivityThread = autoclass("android.app.ActivityThread")
+            app = ActivityThread.currentApplication()
+            if app is not None:
+                return app.getApplicationContext()
+        except Exception:
+            pass
+        try:
+            PythonActivity = autoclass("org.kivy.android.PythonActivity")
+            if PythonActivity.mActivity is not None:
+                return PythonActivity.mActivity
+        except Exception:
+            pass
+        return None
 
     def _ensure_tts(self) -> bool:
-        if not self._jnius_available:
+        if not self._jnius_ok:
             return False
         if self._tts is not None and self._tts_ready:
             return True
         try:
             from jnius import autoclass
-            PythonActivity = autoclass("org.kivy.android.PythonActivity")
             TextToSpeech = autoclass("android.speech.tts.TextToSpeech")
             Locale = autoclass("java.util.Locale")
-            activity = PythonActivity.mActivity
-            if activity is None:
+            ctx = self._get_android_context()
+            if ctx is None:
                 return False
 
-            # Инициализация системного синтезатора речи Google (com.google.android.tts)
-            self._tts = TextToSpeech(activity, None, "com.google.android.tts")
+            # Явно подключаем системный движок "Распознавание и синтез речи от Google"
+            try:
+                self._tts = TextToSpeech(ctx, None, "com.google.android.tts")
+            except Exception:
+                self._tts = TextToSpeech(ctx, None)
+
             time.sleep(0.35)
             self._tts.setLanguage(Locale.US)
             self._tts_ready = True
             return True
         except Exception:
-            try:
-                from jnius import autoclass
-                PythonActivity = autoclass("org.kivy.android.PythonActivity")
-                TextToSpeech = autoclass("android.speech.tts.TextToSpeech")
-                Locale = autoclass("java.util.Locale")
-                self._tts = TextToSpeech(PythonActivity.mActivity, None)
-                time.sleep(0.35)
-                self._tts.setLanguage(Locale.US)
-                self._tts_ready = True
-                return True
-            except Exception:
-                self._tts_ready = False
-                return False
+            self._tts_ready = False
+            return False
 
     def speak_english(self, text: str) -> bool:
-        """Озвучивает английский текст через встроенный синтезатор Android."""
+        """Озвучивает английский текст встроенным синтезатором речи Android."""
         if not text.strip():
             return False
         if not self._ensure_tts():
@@ -241,70 +264,28 @@ class AndroidNativeSpeech:
             TextToSpeech = autoclass("android.speech.tts.TextToSpeech")
             Locale = autoclass("java.util.Locale")
             self._tts.setLanguage(Locale.US)
-            # QUEUE_FLUSH = 0
             self._tts.speak(text, TextToSpeech.QUEUE_FLUSH, None, "tutor_en_tts")
             return True
         except Exception:
             return False
 
-    def recognize_via_system_dialog(self, language: str = "en-US", timeout_sec: float = 15.0) -> str:
-        """Запускает системное окно распознавания речи Google (RecognizerIntent) и ждёт результат."""
-        if not self._jnius_available:
-            raise RuntimeError("Встроенный движок Android недоступен на этой платформе.")
-        from jnius import autoclass
-        PythonActivity = autoclass("org.kivy.android.PythonActivity")
-        Intent = autoclass("android.content.Intent")
-        RecognizerIntent = autoclass("android.speech.RecognizerIntent")
-        SpeechRecognizer = autoclass("android.speech.SpeechRecognizer")
-
-        activity = PythonActivity.mActivity
-        if activity is None:
-            raise RuntimeError("Не удалось получить контекст Android Activity.")
-
-        intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
-        intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-        intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE, language)
-        intent.putExtra(RecognizerIntent.EXTRA_PROMPT, "Говорите по-английски...")
-        intent.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
-
-        # Регистрируем обработчик результата активности (если поддерживается обёрткой Flet/Android)
-        result_holder = {"done": False, "text": "", "error": ""}
-        req_code = 40921
-
+    def launch_google_voice_typing_hint(self) -> bool:
+        """Пробует переключить/вызвать системный голосовой ввод Android, если доступен."""
+        if not self._jnius_ok:
+            return False
         try:
-            from android import activity as android_activity
-
-            def _on_activity_result(request_code, result_code, data):
-                if request_code != req_code:
-                    return
-                try:
-                    # Activity.RESULT_OK == -1
-                    if result_code == -1 and data is not None:
-                        matches = data.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)
-                        if matches is not None and matches.size() > 0:
-                            result_holder["text"] = str(matches.get(0))
-                    else:
-                        result_holder["error"] = "Распознавание отменено."
-                except Exception as e:
-                    result_holder["error"] = f"Ошибка чтения результата: {e}"
-                finally:
-                    result_holder["done"] = True
-
-            android_activity.bind(on_activity_result=_on_activity_result)
-            try:
-                activity.startActivityForResult(intent, req_code)
-                deadline = time.time() + timeout_sec
-                while not result_holder["done"] and time.time() < deadline:
-                    time.sleep(0.1)
-            finally:
-                android_activity.unbind(on_activity_result=_on_activity_result)
-
-            if result_holder["error"]:
-                raise RuntimeError(result_holder["error"])
-            return result_holder["text"].strip()
-        except ImportError:
-            raise RuntimeError("Модуль android.activity не найден. Используйте Whisper API или проверьте сборку APK.")
-# === ЧАСТЬ 3 из 5 (строки 276–415) ===
+            from jnius import autoclass
+            ctx = self._get_android_context()
+            if ctx is None:
+                return False
+            imm = ctx.getSystemService("input_method")
+            if imm is not None:
+                imm.showInputMethodPicker()
+                return True
+        except Exception:
+            pass
+        return False
+# === ЧАСТЬ 3 из 5 (строки 286–430) ===
 class TutorApp:
     def __init__(self, page: ft.Page):
         self.page = page
@@ -319,11 +300,9 @@ class TutorApp:
         self.is_loading = False
         self.android_speech = AndroidNativeSpeech()
 
-        self.audio_player = fta.Audio(autoplay=False)
-        self.page.overlay.append(self.audio_player)
-
+        self.audio_player = fta.Audio()
         self.audio_recorder = far.AudioRecorder()
-        self.page.overlay.append(self.audio_recorder)
+        self.page.services.extend([self.audio_player, self.audio_recorder])
 
         self.init_ui()
         self.load_history()
@@ -338,22 +317,22 @@ class TutorApp:
         self.page.update()
 
     async def speak_text(self, full_text: str):
-        # Извлекаем строго английскую часть (без русского перевода и пояснений)
+        # Озвучиваем исключительно английский текст (без русских слов и переводов)
         en_text = extract_english_part(full_text)
         if not en_text:
             return
-        tts_mode = get_setting("tts_mode", "Встроенный в Android (Google)")
+        tts_mode = get_setting("tts_mode") or "Встроенный в Android (Google)"
 
-        # 1. Встроенный в Android синтезатор речи (Распознавание и синтез речи от Google)
+        # 1. Встроенный в Android синтезатор ("Распознавание и синтез речи от Google")
         if tts_mode == "Встроенный в Android (Google)":
             ok = await asyncio.to_thread(self.android_speech.speak_english, en_text)
             if ok:
                 return
-            # Если запущено не на Android (например, на ПК), плавно переходим на резервный вариант
+            # Если pyjnius не собран в APK или запуск на ПК — переходим к запасному озвучиванию
 
-        # 2. Резервный / облачный вариант (OpenAI TTS через ProxyAPI / VseGPT)
-        provider = get_setting("provider", "ProxyAPI")
-        api_key = get_setting(get_provider_key_name(provider), "").strip()
+        # 2. Облачный OpenAI TTS (через ProxyAPI / VseGPT)
+        provider = get_setting("provider") or "ProxyAPI"
+        api_key = get_setting(get_provider_key_name(provider)).strip()
         if tts_mode == "OpenAI TTS (через API)" and api_key and provider in ("ProxyAPI", "VseGPT"):
             try:
                 if provider == "ProxyAPI":
@@ -370,12 +349,12 @@ class TutorApp:
                         self.audio_player.src = self.tts_path
                         self.audio_player.update()
                         await asyncio.sleep(0.1)
-                        self.audio_player.play()
+                        await self.audio_player.play()
                         return
             except Exception:
                 pass
 
-        # 3. Запасной вариант для ПК / браузера (Google Translate TTS на английском)
+        # 3. Запасной вариант синтеза речи (Google Translate TTS на английском)
         try:
             q = urllib.parse.quote(en_text[:200])
             url = _build_url(
@@ -391,48 +370,31 @@ class TutorApp:
                     self.audio_player.src = self.tts_path
                     self.audio_player.update()
                     await asyncio.sleep(0.1)
-                    self.audio_player.play()
+                    await self.audio_player.play()
         except Exception as e:
             self.show_snack(f"Не удалось озвучить: {e}", is_error=True)
 
     async def on_mic_click(self, e):
-        stt_mode = get_setting("stt_mode", "Встроенный в Android (Google)")
+        stt_mode = get_setting("stt_mode") or "Встроенный в Android (Google)"
 
-        # Вариант А: Встроенное в Android распознавание речи (Распознавание и синтез речи от Google)
+        # Вариант А: Встроенный в Android голосовой ввод Google
         if stt_mode == "Встроенный в Android (Google)":
-            if not self.android_speech.is_available():
+            # Фокусируем поле ввода и вызываем системный переключатель/голосовой ввод Google
+            await self.msg_input.focus()
+            launched = await asyncio.to_thread(self.android_speech.launch_google_voice_typing_hint)
+            if launched:
+                self.show_snack("Выберите 'Голосовой ввод Google' на клавиатуре и говорите по-английски.")
+            else:
                 self.show_snack(
-                    "Встроенный движок Android доступен только на смартфоне. Выберите Whisper API в настройках.",
-                    is_error=True
+                    "Нажмите значок микрофона на клавиатуре Android (Голосовой ввод Google) "
+                    "или выберите Whisper API в настройках."
                 )
-                return
-            try:
-                self.mic_btn.icon = ft.Icons.HEARING
-                self.mic_btn.icon_color = ft.Colors.ORANGE_600
-                self.mic_btn.update()
-                self.show_snack("Слушаю через Google Speech (Android)...")
-
-                recognized_text = await asyncio.to_thread(
-                    self.android_speech.recognize_via_system_dialog, "en-US"
-                )
-                if recognized_text:
-                    self.msg_input.value = recognized_text
-                    self.msg_input.update()
-                    self.show_snack("Речь успешно распознана!")
-                else:
-                    self.show_snack("Речь не распознана. Попробуйте сказать громче.", is_error=True)
-            except Exception as err:
-                self.show_snack(f"Ошибка распознавания Android: {err}", is_error=True)
-            finally:
-                self.mic_btn.icon = ft.Icons.MIC
-                self.mic_btn.icon_color = ft.Colors.INDIGO_600
-                self.mic_btn.update()
             return
 
-        # Вариант Б: Запись WAV и отправка в Whisper API (через ProxyAPI / VseGPT)
+        # Вариант Б: Запись аудио и отправка в Whisper API (ProxyAPI / VseGPT)
         if not self.is_recording:
             try:
-                has_perm = await self.audio_recorder.has_permission_async()
+                has_perm = await self.audio_recorder.has_permission()
                 if not has_perm:
                     self.show_snack("Нет разрешения на использование микрофона!", is_error=True)
                     return
@@ -440,9 +402,10 @@ class TutorApp:
                     os.remove(self.record_path)
                 await self.audio_recorder.start_recording(
                     output_path=self.record_path,
-                    encoder=far.AudioEncoder.WAV,
-                    sample_rate=16000,
-                    num_channels=1
+                    config=far.AudioRecorderConfiguration(
+                        encoder=far.AudioEncoder.WAV,
+                        sample_rate=16000
+                    )
                 )
                 self.is_recording = True
                 self.mic_btn.icon = ft.Icons.STOP_CIRCLE
@@ -454,7 +417,7 @@ class TutorApp:
                 self.show_snack(f"Ошибка микрофона: {ex}", is_error=True)
         else:
             try:
-                await self.audio_recorder.stop_recording_async()
+                await self.audio_recorder.stop_recording()
             except Exception:
                 pass
             self.is_recording = False
@@ -463,15 +426,15 @@ class TutorApp:
             self.mic_btn.tooltip = "Голосовой ввод"
             self.mic_btn.update()
             await self.process_voice_file()
-# === ЧАСТЬ 4 из 5 (строки 416–550) ===
+# === ЧАСТЬ 4 из 5 (строки 431–575) ===
     async def process_voice_file(self):
         if not os.path.exists(self.record_path) or os.path.getsize(self.record_path) < 1000:
             self.show_snack("Запись слишком короткая или пустая.", is_error=True)
             return
 
         self.show_snack("Распознаю речь через Whisper API...")
-        provider = get_setting("provider", "ProxyAPI")
-        api_key = get_setting(get_provider_key_name(provider), "").strip()
+        provider = get_setting("provider") or "ProxyAPI"
+        api_key = get_setting(get_provider_key_name(provider)).strip()
 
         if not api_key or provider not in ("ProxyAPI", "VseGPT"):
             self.show_snack(
@@ -506,8 +469,8 @@ class TutorApp:
             self.show_snack(f"Ошибка распознавания: {e}", is_error=True)
 
     async def ask_ai(self, user_text: str):
-        provider = get_setting("provider", "ProxyAPI")
-        api_key = get_setting(get_provider_key_name(provider), "").strip()
+        provider = get_setting("provider") or "ProxyAPI"
+        api_key = get_setting(get_provider_key_name(provider)).strip()
         if not api_key:
             self.show_snack(f"Сначала укажите API-ключ для {provider} в Настройках!", is_error=True)
             return
@@ -530,16 +493,7 @@ class TutorApp:
             history.append({"role": r, "content": c})
 
         try:
-            if provider == "OpenRouter":
-                url = _build_url(["openrouter", "ai"], ["api", "v1", "chat", "completions"])
-                model = "openai/gpt-4o-mini"
-            elif provider == "ProxyAPI":
-                url = _build_url(["api", "proxyapi", "ru"], ["openai", "v1", "chat", "completions"])
-                model = "gpt-4o-mini"
-            else:
-                url = _build_url(["api", "vsegpt", "ru"], ["v1", "chat", "completions"])
-                model = "openai/gpt-4o-mini"
-
+            url, model = get_provider_config(provider)
             headers = {
                 "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json"
@@ -556,7 +510,10 @@ class TutorApp:
                 if resp.status_code != 200:
                     raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:180]}")
                 data = resp.json()
-                ai_reply = data["choices"][0]["message"]["content"].strip()
+                first_choice = _first(data.get("choices"), {})
+                ai_reply = (first_choice.get("message", {}).get("content") or "").strip()
+                if not ai_reply:
+                    raise RuntimeError("Пустой ответ от модели ИИ.")
 
             conn = sqlite3.connect(DB_PATH)
             cursor = conn.cursor()
@@ -566,7 +523,7 @@ class TutorApp:
 
             self.add_message_bubble("assistant", ai_reply)
 
-            if get_setting("auto_tts", "0") == "1":
+            if get_setting("auto_tts") == "1":
                 await self.speak_text(ai_reply)
 
         except Exception as ex:
@@ -589,7 +546,6 @@ class TutorApp:
         ]
 
         if not is_user:
-            # Кнопка озвучки (озвучивает только английскую часть ответа) и сохранения в словарь
             controls.append(
                 ft.Row(
                     [
@@ -612,12 +568,12 @@ class TutorApp:
                     tight=True
                 )
             )
-# === ЧАСТЬ 5.1 (строки 551–675) ===
+
         bubble = ft.Container(
             content=ft.Column(controls, spacing=4, tight=True),
             bgcolor=ft.Colors.INDIGO_600 if is_user else ft.Colors.WHITE,
-            padding=ft.padding.symmetric(horizontal=14, vertical=10),
-            border_radius=ft.border_radius.only(
+            padding=ft.Padding.symmetric(horizontal=14, vertical=10),
+            border_radius=ft.BorderRadius.only(
                 top_left=16,
                 top_right=16,
                 bottom_left=4 if is_user else 16,
@@ -638,15 +594,15 @@ class TutorApp:
         )
         self.chat_list.controls.append(row)
         self.chat_list.update()
-
+# === ЧАСТЬ 5.1 (строки 576–705) ===
     def save_phrase_dialog(self, full_text: str):
         en_only = extract_english_part(full_text)
         word_field = ft.TextField(label="Фраза на английском", value=en_only[:120], multiline=True)
         trans_field = ft.TextField(label="Перевод на русский", value="", multiline=True)
 
         def save_action(e):
-            w = word_field.value.strip()
-            t = trans_field.value.strip()
+            w = (word_field.value or "").strip()
+            t = (trans_field.value or "").strip()
             if w:
                 conn = sqlite3.connect(DB_PATH)
                 cursor = conn.cursor()
@@ -658,24 +614,17 @@ class TutorApp:
                 conn.close()
                 self.refresh_dictionary()
                 self.show_snack("Сохранено в словарь!")
-            dlg.open = False
-            self.page.update()
+            self.page.pop_dialog()
 
         dlg = ft.AlertDialog(
             title=ft.Text("Добавить в словарь"),
             content=ft.Column([word_field, trans_field], tight=True, width=300),
             actions=[
-                ft.TextButton("Отмена", on_click=lambda e: self.close_dialog(dlg)),
-                ft.ElevatedButton("Сохранить", on_click=save_action)
+                ft.TextButton(content=ft.Text("Отмена"), on_click=lambda e: self.page.pop_dialog()),
+                ft.Button(content=ft.Text("Сохранить"), on_click=save_action)
             ]
         )
-        self.page.overlay.append(dlg)
-        dlg.open = True
-        self.page.update()
-
-    def close_dialog(self, dlg: ft.AlertDialog):
-        dlg.open = False
-        self.page.update()
+        self.page.show_dialog(dlg)
 
     def load_history(self):
         self.chat_list.controls.clear()
@@ -709,7 +658,7 @@ class TutorApp:
                 ft.Container(
                     content=ft.Text("Словарь пока пуст. Сохраняйте фразы из чата!", color=ft.Colors.GREY_600),
                     padding=20,
-                    alignment=ft.alignment.center
+                    alignment=ft.Alignment.CENTER
                 )
             )
         else:
@@ -746,7 +695,7 @@ class TutorApp:
         conn.commit()
         conn.close()
         self.refresh_dictionary()
-# === ЧАСТЬ 5.2 (строки 676–835) ===
+
     def show_about_dialog(self, e):
         app_ver = get_app_version()
         about_dlg = ft.AlertDialog(
@@ -781,14 +730,12 @@ class TutorApp:
                 width=310
             ),
             actions=[
-                ft.TextButton("Закрыть", on_click=lambda ev: self.close_dialog(about_dlg))
+                ft.TextButton(content=ft.Text("Закрыть"), on_click=lambda ev: self.page.pop_dialog())
             ],
             actions_alignment=ft.MainAxisAlignment.END
         )
-        self.page.overlay.append(about_dlg)
-        about_dlg.open = True
-        self.page.update()
-
+        self.page.show_dialog(about_dlg)
+# === ЧАСТЬ 5.2 (строки 706–875) ===
     def init_ui(self):
         # --- Вкладка 1: Чат ---
         self.chat_list = ft.ListView(expand=True, spacing=10, padding=12, auto_scroll=True)
@@ -800,7 +747,7 @@ class TutorApp:
             border_radius=22,
             filled=True,
             bgcolor=ft.Colors.WHITE,
-            content_padding=ft.padding.symmetric(horizontal=16, vertical=10),
+            content_padding=ft.Padding.symmetric(horizontal=16, vertical=10),
             on_submit=lambda e: self.page.run_task(self.on_send_click, e)
         )
         self.mic_btn = ft.IconButton(
@@ -816,13 +763,13 @@ class TutorApp:
             on_click=lambda e: self.page.run_task(self.on_send_click, e)
         )
 
-        chat_view = ft.Column(
+        self.chat_view = ft.Column(
             [
                 self.chat_list,
                 self.loading_bar,
                 ft.Container(
                     content=ft.Row([self.mic_btn, self.msg_input, self.send_btn], spacing=4),
-                    padding=ft.padding.symmetric(horizontal=8, vertical=6),
+                    padding=ft.Padding.symmetric(horizontal=8, vertical=6),
                     bgcolor="#EEF1F6"
                 )
             ],
@@ -832,29 +779,29 @@ class TutorApp:
 
         # --- Вкладка 2: Словарь ---
         self.dict_list = ft.ListView(expand=True, spacing=8, padding=12)
-        dict_view = ft.Column([self.dict_list], expand=True)
+        self.dict_view = ft.Column([self.dict_list], expand=True, visible=False)
 
         # --- Вкладка 3: Настройки ---
         self.provider_dd = ft.Dropdown(
             label="Провайдер ИИ",
-            value=get_setting("provider", "ProxyAPI"),
+            value=get_setting("provider") or "ProxyAPI",
             options=[
                 ft.dropdown.Option("ProxyAPI"),
                 ft.dropdown.Option("VseGPT"),
                 ft.dropdown.Option("OpenRouter")
             ],
-            on_change=self.on_provider_change
+            on_select=self.on_provider_change
         )
         cur_prov = self.provider_dd.value
         self.api_key_field = ft.TextField(
             label=f"API-ключ ({cur_prov})",
-            value=get_setting(get_provider_key_name(cur_prov), ""),
+            value=get_setting(get_provider_key_name(cur_prov)),
             password=True,
             can_reveal_password=True
         )
         self.level_dd = ft.Dropdown(
             label="Уровень английского",
-            value=get_setting("level", "A1-A2 (Начальный)"),
+            value=get_setting("level") or "A1-A2 (Начальный)",
             options=[
                 ft.dropdown.Option("A1-A2 (Начальный)"),
                 ft.dropdown.Option("B1-B2 (Средний)"),
@@ -863,11 +810,11 @@ class TutorApp:
         )
         self.topic_field = ft.TextField(
             label="Тема беседы",
-            value=get_setting("topic", "Путешествия и кафе")
+            value=get_setting("topic") or "Путешествия и кафе"
         )
         self.stt_dd = ft.Dropdown(
             label="Распознавание речи (микрофон)",
-            value=get_setting("stt_mode", "Встроенный в Android (Google)"),
+            value=get_setting("stt_mode") or "Встроенный в Android (Google)",
             options=[
                 ft.dropdown.Option("Встроенный в Android (Google)"),
                 ft.dropdown.Option("Whisper API (через ProxyAPI / VseGPT)")
@@ -875,7 +822,7 @@ class TutorApp:
         )
         self.tts_dd = ft.Dropdown(
             label="Озвучивание речи (только EN)",
-            value=get_setting("tts_mode", "Встроенный в Android (Google)"),
+            value=get_setting("tts_mode") or "Встроенный в Android (Google)",
             options=[
                 ft.dropdown.Option("Встроенный в Android (Google)"),
                 ft.dropdown.Option("OpenAI TTS (через API)")
@@ -883,28 +830,33 @@ class TutorApp:
         )
         self.auto_tts_sw = ft.Switch(
             label="Автоматически озвучивать ответы учителя",
-            value=get_setting("auto_tts", "0") == "1"
+            value=get_setting("auto_tts") == "1"
         )
 
-        save_settings_btn = ft.ElevatedButton(
-            "Сохранить настройки",
-            icon=ft.Icons.SAVE,
+        save_settings_btn = ft.Button(
+            content=ft.Row(
+                [ft.Icon(ft.Icons.SAVE, color=ft.Colors.WHITE), ft.Text("Сохранить настройки", color=ft.Colors.WHITE)],
+                tight=True
+            ),
             bgcolor=ft.Colors.INDIGO_600,
-            color=ft.Colors.WHITE,
             on_click=self.on_save_settings
         )
         clear_chat_btn = ft.OutlinedButton(
-            "Очистить историю чата",
-            icon=ft.Icons.DELETE_SWEEP,
+            content=ft.Row(
+                [ft.Icon(ft.Icons.DELETE_SWEEP), ft.Text("Очистить историю чата")],
+                tight=True
+            ),
             on_click=self.on_clear_chat
         )
         about_btn = ft.OutlinedButton(
-            "О приложении",
-            icon=ft.Icons.INFO_OUTLINE,
+            content=ft.Row(
+                [ft.Icon(ft.Icons.INFO_OUTLINE), ft.Text("О приложении")],
+                tight=True
+            ),
             on_click=self.show_about_dialog
         )
 
-        settings_view = ft.ListView(
+        self.settings_view = ft.ListView(
             [
                 ft.Text("Настройки репетитора", size=18, weight=ft.FontWeight.BOLD),
                 self.provider_dd,
@@ -923,28 +875,31 @@ class TutorApp:
             ],
             expand=True,
             spacing=12,
-            padding=16
+            padding=16,
+            visible=False
         )
 
-        self.tabs = ft.Tabs(
+        self.nav_bar = ft.NavigationBar(
             selected_index=0,
-            animation_duration=200,
-            expand=True,
-            on_change=self.on_tab_change,
-            tabs=[
-                ft.Tab(text="Чат", icon=ft.Icons.CHAT_BUBBLE_OUTLINE, content=chat_view),
-                ft.Tab(text="Словарь", icon=ft.Icons.BOOK_OUTLINED, content=dict_view),
-                ft.Tab(text="Настройки", icon=ft.Icons.SETTINGS_OUTLINED, content=settings_view),
+            on_change=self.on_nav_change,
+            destinations=[
+                ft.NavigationBarDestination(icon=ft.Icons.CHAT_BUBBLE_OUTLINE, label="Чат"),
+                ft.NavigationBarDestination(icon=ft.Icons.BOOK_OUTLINED, label="Словарь"),
+                ft.NavigationBarDestination(icon=ft.Icons.SETTINGS_OUTLINED, label="Настройки"),
             ]
         )
 
+        self.page.appbar = ft.AppBar(
+            title=ft.Text("AI English Tutor", color=ft.Colors.WHITE, weight=ft.FontWeight.BOLD),
+            bgcolor=ft.Colors.INDIGO_600,
+            center_title=True
+        )
+        self.page.navigation_bar = self.nav_bar
         self.page.add(
-            ft.AppBar(
-                title=ft.Text("AI English Tutor", color=ft.Colors.WHITE, weight=ft.FontWeight.BOLD),
-                bgcolor=ft.Colors.INDIGO_600,
-                center_title=True
-            ),
-            self.tabs
+            ft.Container(
+                content=ft.Stack([self.chat_view, self.dict_view, self.settings_view], expand=True),
+                expand=True
+            )
         )
 
     async def on_send_click(self, e):
@@ -961,15 +916,15 @@ class TutorApp:
     def on_provider_change(self, e):
         prov = self.provider_dd.value
         self.api_key_field.label = f"API-ключ ({prov})"
-        self.api_key_field.value = get_setting(get_provider_key_name(prov), "")
+        self.api_key_field.value = get_setting(get_provider_key_name(prov))
         self.api_key_field.update()
 
     def on_save_settings(self, e):
         prov = self.provider_dd.value
         set_setting("provider", prov)
-        set_setting(get_provider_key_name(prov), self.api_key_field.value.strip())
+        set_setting(get_provider_key_name(prov), (self.api_key_field.value or "").strip())
         set_setting("level", self.level_dd.value)
-        set_setting("topic", self.topic_field.value.strip() or "Путешествия и кафе")
+        set_setting("topic", (self.topic_field.value or "").strip() or "Путешествия и кафе")
         set_setting("stt_mode", self.stt_dd.value)
         set_setting("tts_mode", self.tts_dd.value)
         set_setting("auto_tts", "1" if self.auto_tts_sw.value else "0")
@@ -984,15 +939,20 @@ class TutorApp:
         self.load_history()
         self.show_snack("История чата очищена.")
 
-    def on_tab_change(self, e):
-        if self.tabs.selected_index == 1:
+    def on_nav_change(self, e):
+        idx = self.nav_bar.selected_index
+        self.chat_view.visible = (idx == 0)
+        self.dict_view.visible = (idx == 1)
+        self.settings_view.visible = (idx == 2)
+        if idx == 1:
             self.refresh_dictionary()
+        self.page.update()
 
 
 def main(page: ft.Page):
     init_db()
     TutorApp(page)
 
+
 if __name__ == "__main__":
     ft.run(main)
-
