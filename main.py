@@ -523,7 +523,7 @@ class TutorApp:
                 resp = await client.post(url, headers=headers, json=payload)
                 if resp.status_code != 200 and provider == "ProxyAPI":
                     alt_url = _build_url(["api", "proxyapi", "ru"], ["v1", "chat", "completions"])
-                    alt_payload = dict(payload, model="openai/gpt-5-mini")
+                    alt_payload = dict(payload, model="openai/gpt-4o-mini")
                     resp = await client.post(alt_url, headers=headers, json=alt_payload)
 
                 if resp.status_code != 200:
