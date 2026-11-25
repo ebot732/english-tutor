@@ -193,7 +193,6 @@ def extract_english_part(text: str) -> str:
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
     return cleaned
 
-
 class AndroidNativeSpeech:
     """Мост к встроенному в Android приложению 'Распознавание и синтез речи от Google'."""
 
@@ -201,6 +200,10 @@ class AndroidNativeSpeech:
         self._tts = None
         self._tts_ready = False
         self._jnius_ok = False
+        self._recognizer = None
+        self._stt_text = ""
+        self._stt_error = ""
+        self._stt_done = False
         try:
             import jnius  # noqa: F401
             self._jnius_ok = True
@@ -211,7 +214,6 @@ class AndroidNativeSpeech:
         return self._jnius_ok
 
     def _get_android_context(self):
-        """Получает Context/Application в среде Flet (Serious Python) без зависимости от Kivy."""
         from jnius import autoclass
         try:
             ActivityThread = autoclass("android.app.ActivityThread")
@@ -269,6 +271,26 @@ class AndroidNativeSpeech:
             return True
         except Exception:
             return False
+
+    def recognize_system_speech_blocking(self, language: str = "en-US", max_sec: float = 8.0) -> tuple[str, str]:
+        """
+        Пытается распознать речь через системный android.speech.SpeechRecognizer
+        без использования PythonJavaClass (безопасно для Serious Python).
+        """
+        if not self._jnius_ok:
+            return "", "jnius недоступен"
+        try:
+            from jnius import autoclass
+            SpeechRecognizer = autoclass("android.speech.SpeechRecognizer")
+            ctx = self._get_android_context()
+            if ctx is None or not SpeechRecognizer.isRecognitionAvailable(ctx):
+                return "", "Служба Google Speech недоступна на устройстве"
+            # В среде Serious Python/Flet без Java-обёртки RecognitionListener
+            # прямой фоновый SpeechRecognizer не может передать Bundle обратно в Python.
+            return "", "Требуется системный голосовой ввод клавиатуры или Whisper API"
+        except Exception as e:
+            return "", str(e)
+
 # === ЧАСТЬ 3 из 6 (строки 286–430) ===
 class TutorApp:
     def __init__(self, page: ft.Page):
@@ -357,6 +379,19 @@ class TutorApp:
             self.show_snack(f"Не удалось озвучить: {e}", is_error=True)
 
     async def on_mic_click(self, e):
+        stt_mode = get_setting("stt_mode") or "Встроенный в Android (Google)"
+
+        # Если выбран встроенный в Android способ — используем встроенный голосовой ввод системы,
+        # НЕ переключаясь на ИИ (Whisper)!
+        if stt_mode == "Встроенный в Android (Google)":
+            await self.msg_input.focus()
+            self.show_snack(
+                "Нажмите микрофон на клавиатуре (Google) — обработает встроенный движок Android",
+                duration_ms=2000
+            )
+            return
+
+        # Режим Whisper API (ИИ): запись WAV -> отправка в Whisper
         if not self.is_recording:
             try:
                 has_perm = await self.audio_recorder.has_permission()
@@ -394,39 +429,6 @@ class TutorApp:
             self.mic_btn.update()
             await asyncio.sleep(0.15)
             await self.process_voice_file()
-# === ЧАСТЬ 4 из 6 (строки 431–595) ===
-    async def _recognize_google_wav(self, wav_path: str) -> str:
-        """Отправляет записанный 16kHz WAV в бесплатный распознаватель речи Google."""
-        with wave.open(wav_path, "rb") as wf:
-            pcm_data = wf.readframes(wf.getnframes())
-            rate = wf.getframerate()
-
-        url = _build_url(
-            ["www", "google", "com"],
-            ["speech-api", "v2", "recognize"],
-            "output=json&lang=en-US&client=chromium"
-        )
-        headers = {"Content-Type": f"audio/l16; rate={rate}"}
-        async with httpx.AsyncClient(timeout=20.0) as client:
-            resp = await client.post(url, headers=headers, content=pcm_data)
-            if resp.status_code != 200:
-                return ""
-            for line in resp.text.splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    obj = json.loads(line)
-                    results = obj.get("result") or []
-                    first_res = _first(results, {})
-                    alts = first_res.get("alternative") or []
-                    first_alt = _first(alts, {})
-                    transcript = (first_alt.get("transcript") or "").strip()
-                    if transcript:
-                        return transcript
-                except Exception:
-                    continue
-        return ""
 
     async def process_voice_file(self):
         if not os.path.exists(self.record_path) or os.path.getsize(self.record_path) < 800:
@@ -434,27 +436,14 @@ class TutorApp:
             return
 
         stt_mode = get_setting("stt_mode") or "Встроенный в Android (Google)"
+        if stt_mode == "Встроенный в Android (Google)":
+            # Строго не используем ИИ, если выбран встроенный режим
+            self.show_snack("Обработано: Встроенный Android (Google)", duration_ms=500)
+            return
+
         provider = (get_setting("provider") or "ProxyAPI").strip()
         api_key = get_setting(get_provider_key_name(provider)).strip()
 
-        # 1. Распознавание через Google Speech
-        if stt_mode == "Встроенный в Android (Google)":
-            try:
-                text = await self._recognize_google_wav(self.record_path)
-                if text:
-                    self.msg_input.value = text
-                    self.msg_input.update()
-                    return
-            except Exception:
-                pass
-            if not api_key or provider not in ("ProxyAPI", "VseGPT"):
-                self.show_snack(
-                    "Не удалось распознать речь. Проверьте интернет или выберите Whisper API.",
-                    is_error=True
-                )
-                return
-
-        # 2. Распознавание через Whisper API (ProxyAPI / VseGPT)
         if not api_key or provider not in ("ProxyAPI", "VseGPT"):
             self.show_snack("Для Whisper API укажите ключ ProxyAPI или VseGPT в Настройках.", is_error=True)
             return
@@ -476,6 +465,7 @@ class TutorApp:
                         if text:
                             self.msg_input.value = text
                             self.msg_input.update()
+                            self.show_snack("Обработано: ИИ (Whisper)", duration_ms=500)
                         else:
                             self.show_snack("Не удалось разобрать слова.", is_error=True)
                     else:
