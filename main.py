@@ -95,6 +95,7 @@ def init_db():
         "level": "A1-A2 (Начальный)",
         "topic": "Путешествия и кафе",
         "auto_tts": "0",
+        "suggest_dict": "0",
         "tts_mode": "Встроенный в Android (Google)",
         "stt_mode": "Встроенный в Android (Google)"
     }
@@ -534,6 +535,9 @@ class TutorApp:
 
             if get_setting("auto_tts") == "1":
                 await self.speak_text(ai_reply)
+            if get_setting("suggest_dict") == "1" and self._extract_important_english_words(ai_reply):
+                self.save_phrase_dialog(ai_reply)
+
 
         except Exception as ex:
             self.show_snack(f"Ошибка ИИ: {ex}", is_error=True)
@@ -555,28 +559,26 @@ class TutorApp:
         ]
 
         if not is_user:
-            controls.append(
-                ft.Row(
-                    [
-                        ft.IconButton(
-                            icon=ft.Icons.VOLUME_UP,
-                            icon_size=18,
-                            icon_color=ft.Colors.INDIGO_600,
-                            tooltip="Озвучить английский текст",
-                            on_click=lambda e, txt=content: self.page.run_task(self.speak_text, txt)
-                        ),
-                        ft.IconButton(
-                            icon=ft.Icons.BOOKMARK_ADD_OUTLINED,
-                            icon_size=18,
-                            icon_color=ft.Colors.TEAL_600,
-                            tooltip="Сохранить фразу в словарь",
-                            on_click=lambda e, txt=content: self.save_phrase_dialog(txt)
-                        )
-                    ],
-                    spacing=0,
-                    tight=True
+            action_buttons = [
+                ft.IconButton(
+                    icon=ft.Icons.VOLUME_UP,
+                    icon_size=18,
+                    icon_color=ft.Colors.INDIGO_600,
+                    tooltip="Озвучить английский текст",
+                    on_click=lambda e, txt=content: self.page.run_task(self.speak_text, txt)
                 )
-            )
+            ]
+            if get_setting("suggest_dict") == "1":
+                action_buttons.append(
+                    ft.IconButton(
+                        icon=ft.Icons.BOOKMARK_ADD_OUTLINED,
+                        icon_size=18,
+                        icon_color=ft.Colors.TEAL_600,
+                        tooltip="Сохранить слово в словарь",
+                        on_click=lambda e, txt=content: self.save_phrase_dialog(txt)
+                    )
+                )
+            controls.append(ft.Row(action_buttons, spacing=0, tight=True))
 
         bubble = ft.Container(
             content=ft.Column(controls, spacing=4, tight=True),
@@ -604,33 +606,125 @@ class TutorApp:
         self.chat_list.controls.append(row)
         self.chat_list.update()
 
-    def save_phrase_dialog(self, full_text: str):
+    def _extract_important_english_words(self, full_text: str) -> list[str]:
+        """Извлекает уникальные важные английские слова из текста сообщения."""
         en_only = extract_english_part(full_text)
-        word_field = ft.TextField(label="Фраза на английском", value=en_only[:120], multiline=True)
-        trans_field = ft.TextField(label="Перевод на русский", value="", multiline=True)
+        raw_words = re.findall(r"[A-Za-z]+(?:[-'][A-Za-z]+)*", en_only)
+        # фильтруются артикли, местоимения, предлоги, союзы и вспомогательные глаголы
+        stop_words = {
+            "a", "an", "the", "i", "you", "he", "she", "it", "we", "they",
+            "me", "him", "her", "us", "them", "my", "your", "his", "its", "our", "their",
+            "am", "is", "are", "was", "were", "be", "been", "being",
+            "do", "does", "did", "have", "has", "had",
+            "will", "would", "shall", "should", "can", "could", "may", "might", "must",
+            "to", "of", "in", "on", "at", "by", "for", "with", "about", "as", "into",
+            "and", "or", "but", "if", "so", "than", "that", "this", "these", "those",
+            "what", "which", "who", "whom", "whose", "where", "when", "why", "how",
+            "not", "no", "yes", "ok", "okay", "hi", "hello", "hey", "please", "thanks", "thank"
+        }
 
-        def save_action(e):
-            w = (word_field.value or "").strip()
-            t = (trans_field.value or "").strip()
-            if w:
-                conn = sqlite3.connect(DB_PATH)
-                cursor = conn.cursor()
-                cursor.execute(
-                    "INSERT OR REPLACE INTO dictionary (word, translation) VALUES (?, ?)",
-                    (w, t or "—")
-                )
-                conn.commit()
-                conn.close()
-                self.refresh_dictionary()
-                self.show_snack("Сохранено в словарь!", duration_ms=1000)
+        result = []
+        seen = set()
+        for w in raw_words:
+            low = w.lower()
+            if len(low) < 3 or low in stop_words or low in seen:
+                continue
+            seen.add(low)
+            result.append(low)
+        return result
+
+    async def _translate_word_to_ru(self, word: str) -> str:
+        """Получает перевод одного английского слова на русский язык."""
+        url, api_key, model = get_ai_config()
+        if api_key:
+            try:
+                headers = {
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json"
+                }
+                payload = {
+                    "model": model,
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": "Переведи одно английское слово на русский язык. Верни только 1–2 основных значения через запятую, без пояснений и знаков препинания в конце."
+                        },
+                        {"role": "user", "content": word}
+                    ],
+                    "temperature": 0.2,
+                    "max_tokens": 30
+                }
+                async with httpx.AsyncClient(timeout=12.0) as client:
+                    resp = await client.post(url, headers=headers, json=payload)
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        tr = (_first(data.get("choices"), {}).get("message", {}).get("content") or "").strip()
+                        if tr:
+                            return tr
+            except Exception:
+                pass
+
+        # Запасной бесплатный переводчик, если ИИ недоступен
+        try:
+            q = urllib.parse.quote(word)
+            t_url = _build_url(
+                ["translate", "googleapis", "com"],
+                ["translate_a", "single"],
+                f"client=gtx&sl=en&tl=ru&dt=t&q={q}"
+            )
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.get(t_url)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    tr = data[0][0][0].strip()
+                    if tr:
+                        return tr
+        except Exception:
+            pass
+
+        return "—"
+
+    async def _save_single_word_task(self, word: str):
+        """Сохраняет выбранное слово в словарь вместе с переводом."""
+        translation = await self._translate_word_to_ru(word)
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT OR REPLACE INTO dictionary (word, translation) VALUES (?, ?)",
+            (word, translation)
+        )
+        conn.commit()
+        conn.close()
+        if self.dict_view.visible:
+            self.refresh_dictionary()
+
+    def save_phrase_dialog(self, full_text: str):
+        words = self._extract_important_english_words(full_text)
+        if not words:
+            self.show_snack("Нет подходящих английских слов", duration_ms=1000)
+            return
+
+        def on_word_click(e, selected_word: str):
             self.page.pop_dialog()
+            self.show_snack("слово сохранено", duration_ms=300)
+            self.page.run_task(self._save_single_word_task, selected_word)
+
+        word_buttons = [
+            ft.FilledTonalButton(
+                content=ft.Text(w, size=14),
+                on_click=lambda e, w=w: on_word_click(e, w)
+            )
+            for w in words
+        ]
 
         dlg = ft.AlertDialog(
-            title=ft.Text("Добавить в словарь"),
-            content=ft.Column([word_field, trans_field], tight=True, width=300),
+            title=ft.Text("Выберите слово для словаря"),
+            content=ft.Container(
+                content=ft.Row(word_buttons, wrap=True, spacing=8, run_spacing=8),
+                width=300
+            ),
             actions=[
-                ft.TextButton(content=ft.Text("Отмена"), on_click=lambda e: self.page.pop_dialog()),
-                ft.Button(content=ft.Text("Сохранить"), on_click=save_action)
+                ft.TextButton(content=ft.Text("Отмена"), on_click=lambda e: self.page.pop_dialog())
             ]
         )
         self.page.show_dialog(dlg)
@@ -841,6 +935,10 @@ class TutorApp:
             label="Автоматически озвучивать ответы учителя",
             value=get_setting("auto_tts") == "1"
         )
+        self.suggest_dict_sw = ft.Switch(
+            label="Предлагать сохранение в словарь",
+            value=get_setting("suggest_dict") == "1"
+        )
 
         save_settings_btn = ft.Button(
             content=ft.Row(
@@ -937,6 +1035,8 @@ class TutorApp:
         set_setting("stt_mode", self.stt_dd.value)
         set_setting("tts_mode", self.tts_dd.value)
         set_setting("auto_tts", "1" if self.auto_tts_sw.value else "0")
+        set_setting("suggest_dict", "1" if self.suggest_dict_sw.value else "0")
+        self.load_history()
         self.show_snack("Сохранено", duration_ms=500)
 
     def on_clear_chat(self, e):
