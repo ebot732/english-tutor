@@ -975,6 +975,7 @@ class TutorApp:
                 self.stt_dd,
                 self.tts_dd,
                 self.auto_tts_sw,
+                self.suggest_dict_sw,
                 ft.Divider(),
                 ft.Row([save_settings_btn, clear_chat_btn], wrap=True, spacing=10),
                 ft.Container(height=6),
